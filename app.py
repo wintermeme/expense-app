@@ -39,7 +39,7 @@ html, body, .stApp, .stApp p, .stApp label, .stApp li, .stApp h1, .stApp h2, .st
 .stApp code, .stApp pre, .stApp pre * {{ font-family: "SFMono-Regular", Menlo, Consolas, "Sarasa Mono SC", "Noto Sans Mono CJK SC", monospace !important; }}
 .stApp .stButton > button, .stApp .stDownloadButton > button {{ border-radius: 999px; }}
 .stApp [data-baseweb="tab-list"] {{ gap: 4px; overflow-x: auto; }}
-.block-container {{ padding-top: 1.5rem; max-width: 760px; }}
+.block-container {{ padding-top: 4.5rem; max-width: 760px; }}
 @media (max-width: 640px) {{
   .stApp [data-baseweb="tab-list"] {{ position: fixed; bottom: 0; left: 0; right: 0; z-index: 999;
     padding: 6px 8px calc(6px + env(safe-area-inset-bottom)); border-top: 0.5px solid rgba(128,128,160,.35); background: #EFF0F7; }}
