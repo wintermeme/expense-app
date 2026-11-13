@@ -2,6 +2,7 @@ import datetime as dt
 import hmac
 import json
 import uuid
+from collections import Counter
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -62,6 +63,10 @@ def num(x):
         return None
 
 
+def txt(x):
+    return "" if x is None or (isinstance(x, float) and pd.isna(x)) else str(x).strip()
+
+
 def write(mutator, msg="update"):
     try:
         storage.update(mutator, msg)
@@ -95,11 +100,373 @@ def gate():
 
 def mk_item(item, brand, cat, qty, unit, amount, big):
     qty = num(qty)
-    it = {"id": uid(), "item": (item or "").strip() or cat, "brand": (brand or "").strip(),
-          "category": cat, "amount": round(float(amount), 2), "big": bool(big)}
+    it = {"id": uid(), "item": txt(item) or cat, "brand": txt(brand), "category": cat,
+          "amount": round(float(amount), 2), "big": bool(big)}
     if qty and qty > 0 and calc.unit_info(unit):
         it["qty"], it["unit"] = qty, unit
     return it
+
+
+def parse_qty(s):
+    s = txt(s)
+    if not s:
+        return None, None
+    try:
+        v = float(s)
+    except ValueError:
+        return None, "数量要填数字"
+    return (v if v > 0 else None), None
+
+
+# ---------- 历史记忆：店铺、品牌、物品、数量都从已有记录里统计，不用另外存 ----------
+def hist(d):
+    sc, bc, ic = Counter(), Counter(), Counter()
+    last, qtys, ibr = {}, {}, {}
+    for o in sorted(d["orders"], key=lambda o: o["date"]):
+        if o.get("store"):
+            sc[o["store"]] += 1
+        for i in o["items"]:
+            ic[i["item"]] += 1
+            last[i["item"]] = {"brand": i.get("brand", ""), "category": i["category"], "unit": i.get("unit")}
+            if i.get("brand"):
+                bc[i["brand"]] += 1
+                ibr.setdefault(i["item"], Counter())[i["brand"]] += 1
+            if i.get("qty"):
+                qtys.setdefault(i["item"], []).append(f"{i['qty']:g}")
+    return {"stores": [k for k, _ in sc.most_common()], "brands": [k for k, _ in bc.most_common()],
+            "items": [k for k, _ in ic.most_common()], "last": last,
+            "ibrands": {k: [b for b, _ in v.most_common()] for k, v in ibr.items()},
+            "qtys": {k: list(dict.fromkeys(reversed(v)))[:6] for k, v in qtys.items()}}
+
+
+def opts(base, cur):
+    base = list(base)
+    return base + ([cur] if cur and cur not in base else [])
+
+
+def item_fields(p, init, d):
+    """竖着排的一件商品表单。p 是控件 key 前缀。选了物品后，品牌、分类、单位自动带出上次的值。"""
+    ss, H, cats = st.session_state, hist(d), list(d["categories"])
+    ss.setdefault(p + "item", init.get("item") or None)
+    ss.setdefault(p + "brand", init.get("brand") or None)
+    ss.setdefault(p + "cat", init.get("cat") if init.get("cat") in cats else cats[0])
+    ss.setdefault(p + "qty", init.get("qty") or None)
+    ss.setdefault(p + "unit", init.get("unit") or "g")
+    ss.setdefault(p + "big", bool(init.get("big")))
+    ss.setdefault(p + "last", init.get("item") or None)
+    if init.get("amount") is not None:
+        ss.setdefault(p + "amount", float(init["amount"]))
+    st.selectbox("物品", opts(H["items"], ss[p + "item"]), index=None, accept_new_options=True,
+                 placeholder="选择历史，或直接输入新的", key=p + "item")
+    cur = ss[p + "item"]
+    if cur != ss[p + "last"]:
+        ss[p + "last"] = cur
+        lp = H["last"].get(cur)
+        if lp:
+            ss[p + "brand"] = lp["brand"] or None
+            if lp["category"] in cats:
+                ss[p + "cat"] = lp["category"]
+            if lp["unit"]:
+                ss[p + "unit"] = lp["unit"]
+    ib = H["ibrands"].get(cur, [])
+    st.selectbox("品牌（可不填）", opts(ib + [b for b in H["brands"] if b not in ib], ss[p + "brand"]), index=None,
+                 accept_new_options=True, placeholder="选择历史，或直接输入", key=p + "brand")
+    st.selectbox("分类", cats, key=p + "cat")
+    st.selectbox("数量（可不填）", opts(H["qtys"].get(cur, []), ss[p + "qty"]), index=None, accept_new_options=True,
+                 placeholder="选择历史，或直接输入数字", key=p + "qty")
+    st.selectbox("单位", calc.UNIT_LIST, key=p + "unit")
+    st.number_input("金额（元）", min_value=0.0, value=None, step=0.5, format="%.2f", placeholder="0.00", key=p + "amount")
+    st.checkbox("偶发大件，不计入日均", key=p + "big")
+
+
+def read_item(p, cats):
+    ss = st.session_state
+    if not ss.get(p + "amount"):
+        return None, "请先填写金额"
+    q, err = parse_qty(ss.get(p + "qty"))
+    if err:
+        return None, err
+    return mk_item(ss.get(p + "item"), ss.get(p + "brand"), ss.get(p + "cat") or cats[0], q,
+                   ss.get(p + "unit"), ss[p + "amount"], ss.get(p + "big")), None
+
+
+def commit_order(day, store, items, extras, draft_id=None):
+    order = {"id": uid(), "date": str(day), "store": txt(store), "extras": extras, "items": items}
+
+    def mut(d):
+        d["orders"].append(order)
+        if draft_id:
+            d["drafts"] = [x for x in d["drafts"] if x["id"] != draft_id]
+    return write(mut, "add order")
+
+
+def save_draft(kind, form, draft_id):
+    rec = {"id": draft_id, "kind": kind, "updated": dt.datetime.now().strftime("%m-%d %H:%M"), "form": form}
+    return write(lambda d: d.__setitem__("drafts", [x for x in d["drafts"] if x["id"] != draft_id] + [rec]), "save draft")
+
+
+def extras_of(ship, other, disc):
+    return [{"name": k, "amount": v} for k, v in (("运费", ship), ("杂费", other), ("优惠", -(disc or 0))) if v]
+
+
+def frag_rerun():
+    """弹窗内只刷新弹窗本身；万一不在弹窗里，退回整页刷新。"""
+    try:
+        st.rerun(scope="fragment")
+    except st.errors.StreamlitAPIException:
+        st.rerun()
+
+
+def clear_dlg():
+    for k in [k for k in st.session_state if k.startswith("dlg_")]:
+        del st.session_state[k]
+
+
+# ---------- 弹窗 ----------
+@st.dialog("记一件")
+def dlg_one():
+    ss, d = st.session_state, st.session_state["data"]
+    init, H, cats = ss.get("dlg_init", {}), hist(d), list(d["categories"])
+    ss.setdefault("dlg_o_date", dt.date.fromisoformat(init["date"]) if init.get("date") else ss["today"])
+    ss.setdefault("dlg_o_store", init.get("store") or None)
+    st.date_input("日期", key="dlg_o_date")
+    st.selectbox("店铺（可不填）", opts(H["stores"], ss["dlg_o_store"]), index=None, accept_new_options=True,
+                 placeholder="选择历史，或直接输入", key="dlg_o_store")
+    item_fields("dlg_o_", init, d)
+    with st.expander("附加费用（运费、杂费、优惠）"):
+        ss.setdefault("dlg_o_ship", init.get("ship") or 0.0)
+        ss.setdefault("dlg_o_other", init.get("other") or 0.0)
+        ss.setdefault("dlg_o_disc", init.get("disc") or 0.0)
+        st.number_input("运费", min_value=0.0, step=1.0, key="dlg_o_ship")
+        st.number_input("打包等杂费", min_value=0.0, step=1.0, key="dlg_o_other")
+        st.number_input("优惠减免", min_value=0.0, step=1.0, key="dlg_o_disc")
+    c1, c2 = st.columns(2)
+    if c1.button("保存", type="primary", width="stretch"):
+        it, err = read_item("dlg_o_", cats)
+        if err:
+            st.warning(err)
+        elif commit_order(ss["dlg_o_date"], ss["dlg_o_store"], [it],
+                          extras_of(ss["dlg_o_ship"], ss["dlg_o_other"], ss["dlg_o_disc"]), ss.get("dlg_draft")):
+            ss["flash"] = "已记录 ✓"
+            st.rerun()
+    if c2.button("存草稿", width="stretch"):
+        ss["dlg_draft"] = ss.get("dlg_draft") or uid()
+        p = "dlg_o_"
+        form = {"date": str(ss[p + "date"]), "store": ss[p + "store"], "item": ss[p + "item"], "brand": ss[p + "brand"],
+                "cat": ss[p + "cat"], "qty": ss[p + "qty"], "unit": ss[p + "unit"], "amount": ss.get(p + "amount"),
+                "big": ss[p + "big"], "ship": ss[p + "ship"], "other": ss[p + "other"], "disc": ss[p + "disc"]}
+        if save_draft("one", form, ss["dlg_draft"]):
+            ss["flash"] = "已存入草稿箱"
+            st.rerun()
+
+
+@st.dialog("记多件")
+def dlg_multi():
+    ss, d = st.session_state, st.session_state["data"]
+    init, H, cats = ss.get("dlg_init", {}), hist(d), list(d["categories"])
+    ss.setdefault("dlg_m_date", dt.date.fromisoformat(init["date"]) if init.get("date") else ss["today"])
+    ss.setdefault("dlg_m_store", init.get("store") or None)
+    st.date_input("日期", key="dlg_m_date")
+    st.selectbox("店铺（填一次，整单共用）", opts(H["stores"], ss["dlg_m_store"]), index=None, accept_new_options=True,
+                 placeholder="选择历史，或直接输入", key="dlg_m_store")
+    items = ss["dlg_m_items"]
+
+    def autosave():
+        ss["dlg_draft"] = ss.get("dlg_draft") or uid()
+        form = {"date": str(ss["dlg_m_date"]), "store": ss["dlg_m_store"], "items": ss["dlg_m_items"],
+                "ship": ss.get("dlg_m_ship", 0.0), "other": ss.get("dlg_m_other", 0.0), "disc": ss.get("dlg_m_disc", 0.0)}
+        return save_draft("multi", form, ss["dlg_draft"])
+
+    if items:
+        st.markdown(f"**已加入 {len(items)} 件，商品合计 ¥{sum(i['amount'] for i in items):.2f}**")
+        for it in items:
+            a, b = st.columns([6, 1])
+            a.write(f"{it['item']}{'·' + it['brand'] if it['brand'] else ''}　¥{it['amount']:.2f}")
+            if b.button("✕", key="dlg_mdel_" + it["id"]):
+                ss["dlg_m_items"] = [x for x in items if x["id"] != it["id"]]
+                autosave()
+                frag_rerun()
+    st.divider()
+    st.markdown("**添加一件商品**")
+    p = f"dlg_m{ss['dlg_m_c']}_"
+    item_fields(p, {}, d)
+    if st.button("加入这一件", width="stretch"):
+        it, err = read_item(p, cats)
+        if err:
+            st.warning(err)
+        else:
+            ss["dlg_m_items"] = items + [it]
+            ss["dlg_m_c"] += 1
+            autosave()
+            frag_rerun()
+    st.divider()
+    st.markdown("**整单的附加费用**")
+    st.caption("会按每件商品的金额比例分摊到每一件上")
+    ss.setdefault("dlg_m_ship", init.get("ship") or 0.0)
+    ss.setdefault("dlg_m_other", init.get("other") or 0.0)
+    ss.setdefault("dlg_m_disc", init.get("disc") or 0.0)
+    st.number_input("运费", min_value=0.0, step=1.0, key="dlg_m_ship")
+    st.number_input("打包等杂费", min_value=0.0, step=1.0, key="dlg_m_other")
+    st.number_input("优惠减免", min_value=0.0, step=1.0, key="dlg_m_disc")
+    c1, c2 = st.columns(2)
+    if c1.button("提交订单", type="primary", width="stretch"):
+        if not items:
+            st.warning("还没有加入任何商品")
+        elif ss.get(p + "amount"):
+            st.warning("上面还有一件填了金额但没加入，请先点「加入这一件」")
+        elif commit_order(ss["dlg_m_date"], ss["dlg_m_store"], items,
+                          extras_of(ss["dlg_m_ship"], ss["dlg_m_other"], ss["dlg_m_disc"]), ss.get("dlg_draft")):
+            ss["flash"] = f"已记录订单，共 {len(items)} 件 ✓"
+            st.rerun()
+    if c2.button("存草稿", width="stretch"):
+        if autosave():
+            ss["flash"] = "已存入草稿箱"
+            st.rerun()
+
+
+@st.dialog("编辑这一件")
+def dlg_edit(rid):
+    ss, d = st.session_state, st.session_state["data"]
+    cats = list(d["categories"])
+    r = next((x for x in an.records(d) if x["id"] == rid), None)
+    if r is None:
+        st.info("这条记录已不存在")
+        return
+    init = {"item": r["item"], "brand": r["brand"], "cat": r["category"], "unit": r["unit"], "amount": r["amount"],
+            "qty": f"{r['qty']:g}" if r["qty"] else None, "big": r["kind"] == "big" and r["category"] in d["categories"]
+            and d["categories"][r["category"]].get("kind") != "big"}
+    st.caption(f"{r['date']}　{r['store']}")
+    item_fields("dlg_e_", init, d)
+    c1, c2 = st.columns(2)
+    if c1.button("保存修改", type="primary", width="stretch"):
+        it, err = read_item("dlg_e_", cats)
+        if err:
+            st.warning(err)
+        else:
+            def mut(dd):
+                for o in dd["orders"]:
+                    for x in o["items"]:
+                        if x["id"] == rid:
+                            x.update(item=it["item"], brand=it["brand"], category=it["category"],
+                                     amount=it["amount"], big=it["big"])
+                            x.pop("qty", None)
+                            x.pop("unit", None)
+                            if "qty" in it:
+                                x["qty"], x["unit"] = it["qty"], it["unit"]
+            if write(mut, "edit item"):
+                ss["flash"] = "已保存修改"
+                st.rerun()
+    if not ss.get("dlg_e_confirm"):
+        if c2.button("删除这件", width="stretch"):
+            ss["dlg_e_confirm"] = True
+            frag_rerun()
+    else:
+        st.warning("确定删除这一件吗？")
+        d1, d2 = st.columns(2)
+        if d1.button("确认删除", type="primary", width="stretch"):
+            def mut(dd):
+                for o in dd["orders"]:
+                    o["items"] = [x for x in o["items"] if x["id"] != rid]
+                dd["orders"] = [o for o in dd["orders"] if o["items"]]
+            if write(mut, "delete item"):
+                ss["flash"] = "已删除"
+                st.rerun()
+        if d2.button("取消", width="stretch"):
+            ss["dlg_e_confirm"] = False
+            frag_rerun()
+
+
+@st.dialog("添加比价选项")
+def dlg_cmp():
+    ss, d = st.session_state, st.session_state["data"]
+    H = hist(d)
+    st.selectbox("品牌", opts(H["brands"], ss.get("dlg_c_brand")), index=None, accept_new_options=True,
+                 placeholder="选择历史，或直接输入", key="dlg_c_brand")
+    st.number_input("价格（元）", min_value=0.0, value=None, step=0.5, format="%.2f", key="dlg_c_price")
+    st.number_input("数量", min_value=0.0, value=None, step=1.0, key="dlg_c_qty")
+    ss.setdefault("dlg_c_unit", "g")
+    st.selectbox("单位", calc.UNIT_LIST, key="dlg_c_unit")
+    if st.button("添加", type="primary", width="stretch"):
+        if not ss.get("dlg_c_price") or not ss.get("dlg_c_qty"):
+            st.warning("价格和数量都要填")
+        else:
+            ss["cmp_opts"].append({"brand": txt(ss.get("dlg_c_brand")), "price": ss["dlg_c_price"],
+                                   "qty": ss["dlg_c_qty"], "unit": ss["dlg_c_unit"]})
+            st.rerun()
+
+
+@st.dialog("记缴费")
+def dlg_bill():
+    ss, d = st.session_state, st.session_state["data"]
+    names = sorted({b["name"] for b in d["bills"]} | {"房租", "物业", "电费", "水费", "燃气", "网费", "话费"})
+    ss.setdefault("dlg_b_date", ss["today"])
+    st.selectbox("名称", opts(names, ss.get("dlg_b_name")), index=None, accept_new_options=True,
+                 placeholder="选择，或直接输入", key="dlg_b_name")
+    st.date_input("缴费日期", key="dlg_b_date")
+    st.number_input("金额（元）", min_value=0.0, value=None, step=10.0, format="%.2f", key="dlg_b_amt")
+    if st.button("保存", type="primary", width="stretch"):
+        if not txt(ss.get("dlg_b_name")) or not ss.get("dlg_b_amt"):
+            st.warning("请填写名称和金额")
+        else:
+            rec = {"id": uid(), "name": txt(ss["dlg_b_name"]), "date": str(ss["dlg_b_date"]), "amount": float(ss["dlg_b_amt"])}
+            if write(lambda dd: dd["bills"].append(rec), "add bill"):
+                ss["flash"] = "已记录缴费 ✓"
+                st.rerun()
+
+
+@st.dialog("记收入")
+def dlg_income():
+    ss, d = st.session_state, st.session_state["data"]
+    srcs = list(dict.fromkeys(x["source"] for x in d["income"]))
+    ss.setdefault("dlg_i_date", ss["today"])
+    st.selectbox("来源", opts(srcs, ss.get("dlg_i_src")), index=None, accept_new_options=True,
+                 placeholder="比如：工资", key="dlg_i_src")
+    st.date_input("日期", key="dlg_i_date")
+    st.number_input("金额（元）", min_value=0.0, value=None, step=100.0, format="%.2f", key="dlg_i_amt")
+    if st.button("保存", type="primary", width="stretch"):
+        if not ss.get("dlg_i_amt"):
+            st.warning("请填写金额")
+        else:
+            rec = {"id": uid(), "source": txt(ss.get("dlg_i_src")) or "收入", "date": str(ss["dlg_i_date"]),
+                   "amount": float(ss["dlg_i_amt"])}
+            if write(lambda dd: dd["income"].append(rec), "add income"):
+                ss["flash"] = "已记录收入 ✓"
+                st.rerun()
+
+
+@st.dialog("确认删除")
+def dlg_confirm(kind, rid, label):
+    st.write(f"确定删除「{label}」吗？")
+    c1, c2 = st.columns(2)
+    if c1.button("确认删除", type="primary", width="stretch"):
+        if write(lambda d: d.__setitem__(kind, [x for x in d[kind] if x["id"] != rid]), "delete " + kind):
+            st.session_state["flash"] = "已删除"
+            st.rerun()
+    if c2.button("取消", width="stretch"):
+        st.rerun()
+
+
+def open_one(init=None, draft=None):
+    clear_dlg()
+    st.session_state["dlg_init"], st.session_state["dlg_draft"] = init or {}, draft
+    dlg_one()
+
+
+def open_multi(init=None, draft=None):
+    clear_dlg()
+    ss = st.session_state
+    ss["dlg_init"], ss["dlg_draft"] = init or {}, draft
+    ss["dlg_m_items"], ss["dlg_m_c"] = list((init or {}).get("items", [])), 0
+    dlg_multi()
+
+
+def open_plain(fn, *args):
+    clear_dlg()
+    fn(*args)
+
+
+def lbl(r):
+    return f"{r['item']}{'·' + r['brand'] if r['brand'] else ''}"
 
 
 gate()
@@ -116,10 +483,10 @@ try:
     today = dt.datetime.now(ZoneInfo(S.get("tz", "Asia/Shanghai"))).date()
 except Exception:
     today = dt.date.today()
+st.session_state["today"] = today
+st.session_state.setdefault("cmp_opts", [])
 if st.session_state.get("flash"):
     st.toast(st.session_state.pop("flash"))
-st.session_state.setdefault("n", 0)
-n = st.session_state["n"]
 cats = list(data["categories"])
 recs = an.records(data)
 
@@ -127,125 +494,74 @@ t_add, t_rc, t_cmp, t_price, t_rep, t_life, t_set = st.tabs(["记账", "小票",
 
 # ---------------- 记账 ----------------
 with t_add:
-    mode = st.radio("方式", ["快速记一笔", "记订单（多件 / 有运费）"], horizontal=True, label_visibility="collapsed")
-    c1, c2 = st.columns(2)
-    day = c1.date_input("日期", value=today, key="add_date")
-    store = c2.text_input("店铺（可不填）", key="add_store")
-    items = []
-    if mode == "快速记一笔":
-        amount = st.number_input("金额（元）", min_value=0.0, value=None, step=0.5, format="%.2f",
-                                 placeholder="0.00", key=f"amt{n}")
-        cat = st.pills("分类", cats, selection_mode="single", default=cats[0], key=f"cat{n}") or cats[0]
-        names = sorted({i["item"] for o in data["orders"] for i in o["items"]})
-        item = st.selectbox("物品", names, index=None, accept_new_options=True,
-                            placeholder="选择，或直接输入新物品", key=f"item{n}")
-        brand = st.text_input("品牌（可不填）", key=f"brand{n}")
-        q1, q2 = st.columns(2)
-        qty = q1.number_input("数量（买菜、日用品建议填）", min_value=0.0, value=None, step=1.0, key=f"qty{n}")
-        unit = q2.selectbox("单位", calc.UNIT_LIST, key=f"unit{n}")
-        big = st.checkbox("这笔是偶发大件，不计入日均", key=f"big{n}")
-        if amount:
-            items.append(mk_item(item, brand, cat, qty, unit, amount, big))
-    else:
-        st.caption("每行一件物品；分类、单位可点选。运费、优惠在下方填写，会按金额比例摊到每件上。")
-        base = pd.DataFrame({"物品": [""] * 3, "品牌": [""] * 3, "分类": [cats[0]] * 3,
-                             "数量": pd.Series([None] * 3, dtype="float"), "单位": ["g"] * 3,
-                             "金额": pd.Series([None] * 3, dtype="float"), "大件": [False] * 3})
-        ed = st.data_editor(base, num_rows="dynamic", width="stretch", key=f"oe{n}", column_config={
-            "分类": st.column_config.SelectboxColumn(options=cats, required=True),
-            "单位": st.column_config.SelectboxColumn(options=calc.UNIT_LIST),
-            "数量": st.column_config.NumberColumn(min_value=0.0),
-            "金额": st.column_config.NumberColumn(min_value=0.0, format="%.2f"),
-            "大件": st.column_config.CheckboxColumn()})
-        for r in ed.to_dict("records"):
-            if num(r["金额"]):
-                items.append(mk_item(r["物品"], r["品牌"], r["分类"] or cats[0], r["数量"], r["单位"], r["金额"], r["大件"]))
-    with st.expander("附加费用（运费、杂费、优惠）"):
-        f1, f2, f3 = st.columns(3)
-        ship = f1.number_input("运费", min_value=0.0, value=0.0, step=1.0, key=f"ship{n}")
-        other = f2.number_input("打包等杂费", min_value=0.0, value=0.0, step=1.0, key=f"oth{n}")
-        disc = f3.number_input("优惠减免", min_value=0.0, value=0.0, step=1.0, key=f"disc{n}")
-    if st.button("记一笔", type="primary", width="stretch"):
-        if not items:
-            st.warning("请先填写金额")
-        else:
-            extras = [{"name": k, "amount": v} for k, v in (("运费", ship), ("杂费", other), ("优惠", -disc)) if v]
-            order = {"id": uid(), "date": str(day), "store": store.strip(), "extras": extras, "items": items}
-            if write(lambda d: d["orders"].append(order), "add order"):
-                st.session_state["n"] += 1
-                st.session_state["flash"] = "已记录 ✓"
-                st.rerun()
-    today_total = sum(r["amount"] for r in recs if r["date"] == str(today))
-    st.caption(f"今天已记 ¥{today_total:.2f}")
+    b1, b2 = st.columns(2)
+    if b1.button("＋ 记一件", type="primary", width="stretch"):
+        open_one()
+    if b2.button("＋ 记多件", width="stretch"):
+        open_multi()
+    drafts = data["drafts"]
+    if drafts:
+        with st.expander(f"草稿箱（{len(drafts)}）"):
+            for dr in sorted(drafts, key=lambda x: x["updated"], reverse=True):
+                f = dr["form"]
+                if dr["kind"] == "multi":
+                    desc = f"记多件 · {f.get('date', '')} · {f.get('store') or '未填店铺'} · 已加 {len(f.get('items', []))} 件"
+                else:
+                    amt = f"¥{f['amount']:.2f}" if f.get("amount") else "未填金额"
+                    desc = f"记一件 · {f.get('date', '')} · {f.get('item') or '未填物品'} · {amt}"
+                st.write(desc + f"　（{dr['updated']}）")
+                g1, g2 = st.columns(2)
+                if g1.button("继续填写", key="drgo_" + dr["id"], width="stretch"):
+                    (open_multi if dr["kind"] == "multi" else open_one)(f, dr["id"])
+                if g2.button("删除草稿", key="drdel_" + dr["id"], width="stretch"):
+                    if write(lambda d, i=dr["id"]: d.__setitem__("drafts", [x for x in d["drafts"] if x["id"] != i]), "del draft"):
+                        st.rerun()
+    trs = [r for r in recs if r["date"] == str(today)]
+    st.caption(f"今天已记 ¥{sum(r['amount'] for r in trs):.2f}，共 {len(trs)} 件")
+    for r in trs[-6:][::-1]:
+        st.write(f"· {lbl(r)}　¥{r['amount']:.2f}")
 
 # ---------------- 小票 ----------------
 with t_rc:
     rday = st.date_input("日期", value=today, key="rday")
-    txt = receipt.render_day(data, str(rday))
-    st.code(txt, language=None)
-    st.download_button("下载 .txt", txt, file_name=f"小票-{rday}.txt", width="stretch")
+    rtxt = receipt.render_day(data, str(rday))
+    st.code(rtxt, language=None)
+    st.download_button("下载 .txt", rtxt, file_name=f"小票-{rday}.txt", width="stretch")
     drs = [r for r in recs if r["date"] == str(rday)]
-    with st.expander("修改 / 删除当天记录"):
+    with st.expander(f"修改 / 删除当天记录（{len(drs)}）"):
         if not drs:
             st.caption("这一天没有记录。")
-        else:
-            df = pd.DataFrame([{"id": r["id"], "物品": r["item"], "品牌": r["brand"], "分类": r["category"],
-                                "数量": r["qty"], "单位": r["unit"], "金额": r["amount"],
-                                "大件": r["kind"] == "big", "删除": False} for r in drs])
-            df["数量"] = df["数量"].astype("float")
-            ed = st.data_editor(df, key=f"mg{rday}", width="stretch", hide_index=True, column_config={
-                "id": None,
-                "分类": st.column_config.SelectboxColumn(options=cats),
-                "单位": st.column_config.SelectboxColumn(options=calc.UNIT_LIST),
-                "金额": st.column_config.NumberColumn(min_value=0.0, format="%.2f")})
-            st.caption("「大件」只在你手动标记时保存；按金额自动转大件的不用管。")
-            if st.button("保存修改", key="mgsave"):
-                chg = {r["id"]: r for r in ed.to_dict("records")}
-
-                def mut(d):
-                    for o in d["orders"]:
-                        keep = []
-                        for it in o["items"]:
-                            r = chg.get(it["id"])
-                            if r is None:
-                                keep.append(it)
-                                continue
-                            if r["删除"]:
-                                continue
-                            nm = mk_item(r["物品"], r["品牌"], r["分类"], r["数量"], r["单位"], r["金额"], False)
-                            it.update(item=nm["item"], brand=nm["brand"], category=nm["category"], amount=nm["amount"])
-                            it.pop("qty", None)
-                            it.pop("unit", None)
-                            if "qty" in nm:
-                                it["qty"], it["unit"] = nm["qty"], nm["unit"]
-                            keep.append(it)
-                        o["items"] = keep
-                    d["orders"] = [o for o in d["orders"] if o["items"]]
-
-                if write(mut, "edit items"):
-                    st.session_state["flash"] = "已保存"
-                    st.rerun()
+        for r in drs:
+            a, b = st.columns([5, 1])
+            a.write(f"{lbl(r)}　¥{r['amount']:.2f}")
+            if b.button("改", key="ed_" + r["id"]):
+                clear_dlg()
+                dlg_edit(r["id"])
 
 # ---------------- 比价 ----------------
 with t_cmp:
-    st.caption("输入同一种东西的几个选项，自动换算成同一单位，选出最划算的。")
-    base = pd.DataFrame({"品牌": ["", ""], "价格": pd.Series([None, None], dtype="float"),
-                         "数量": pd.Series([None, None], dtype="float"), "单位": ["g", "g"]})
-    ed = st.data_editor(base, num_rows="dynamic", width="stretch", key="cmp", column_config={
-        "价格": st.column_config.NumberColumn(min_value=0.0, format="%.2f"),
-        "数量": st.column_config.NumberColumn(min_value=0.0),
-        "单位": st.column_config.SelectboxColumn(options=calc.UNIT_LIST)})
-    opts = [{"brand": r["品牌"], "price": num(r["价格"]), "qty": num(r["数量"]), "unit": r["单位"]}
-            for r in ed.to_dict("records")]
-    rows, err = calc.compare(opts)
-    if err:
-        st.info(err)
-    else:
-        b = rows[0]
-        st.success(f"最划算：{b['brand']}，{b['up']:.2f} {b['label']}，比最贵的省 {b['save_pct']:.0f}%")
-        st.dataframe(pd.DataFrame([{"品牌": r["brand"], "价格": r["price"], "数量": f"{r['qty']:g}{r['unit']}",
-                                    "单价": f"{r['up']:.2f} {r['label']}", "比最贵省": f"{r['save_pct']:.0f}%"}
-                                   for r in rows]), hide_index=True, width="stretch")
+    st.caption("把同一种东西的几个选项加进来，自动换算成同一单位，选出最划算的。")
+    if st.button("＋ 添加选项", type="primary", width="stretch"):
+        open_plain(dlg_cmp)
+    for i, o in enumerate(st.session_state["cmp_opts"]):
+        a, b = st.columns([6, 1])
+        a.write(f"{o['brand'] or '（未填品牌）'}　¥{o['price']:g} / {o['qty']:g}{o['unit']}")
+        if b.button("✕", key=f"cmpdel{i}"):
+            st.session_state["cmp_opts"].pop(i)
+            st.rerun()
+    if st.session_state["cmp_opts"]:
+        rows, err = calc.compare(st.session_state["cmp_opts"])
+        if err:
+            st.info(err)
+        else:
+            b0 = rows[0]
+            st.success(f"最划算：{b0['brand']}，{b0['up']:.2f} {b0['label']}，比最贵的省 {b0['save_pct']:.0f}%")
+            st.dataframe(pd.DataFrame([{"品牌": r["brand"], "单价": f"{r['up']:.2f} {r['label']}",
+                                        "比最贵省": f"{r['save_pct']:.0f}%"} for r in rows]),
+                         hide_index=True, width="stretch")
+        if st.button("清空选项", width="stretch"):
+            st.session_state["cmp_opts"] = []
+            st.rerun()
 
 # ---------------- 价格 ----------------
 with t_price:
@@ -271,8 +587,7 @@ with t_price:
         st.caption(f"单位：{lab}，共 {sts['n']} 次记录" + ("；记录不足 3 次，波动判断仅供参考" if sts["n"] < 3 else ""))
         cdf = pd.DataFrame({"日期": pd.to_datetime([r["date"] for r in rs]), "单价": [r[key] for r in rs]})
         st.line_chart(cdf.sort_values("日期").set_index("日期"))
-        tbl = pd.DataFrame([{"日期": r["date"], "品牌": r["brand"], "店铺": r["store"],
-                             "数量": f"{r['qty']:g}{r['unit']}", "金额": r["amount"], "单价": round(r[key], 2),
+        tbl = pd.DataFrame([{"日期": r["date"][5:], "品牌": r["brand"], "店铺": r["store"], "单价": round(r[key], 2),
                              "标记": "▼最低" if r["id"] == sts["lo"]["id"] else ("▲最高" if r["id"] == sts["hi"]["id"] else "")}
                             for r in sorted(rs, key=lambda r: r["date"], reverse=True)])
         st.dataframe(tbl, hide_index=True, width="stretch")
@@ -341,54 +656,34 @@ with t_rep:
 
 # ---------------- 生活 ----------------
 with t_life:
-    st.write("缴费记录")
-    bn = sorted({b["name"] for b in data["bills"]} | {"房租", "物业", "电费", "水费", "燃气", "网费", "话费"})
-    l1, l2, l3 = st.columns(3)
-    bname = l1.selectbox("名称", bn, index=None, accept_new_options=True, placeholder="选择或输入", key=f"bn{n}")
-    bdate = l2.date_input("缴费日期", value=today, key=f"bd{n}")
-    bamt = l3.number_input("金额", min_value=0.0, value=None, step=10.0, key=f"ba{n}")
-    if st.button("记缴费", width="stretch"):
-        if not bname or not bamt:
-            st.warning("请填写名称和金额")
-        else:
-            rec = {"id": uid(), "name": bname.strip(), "date": str(bdate), "amount": float(bamt)}
-            if write(lambda d: d["bills"].append(rec), "add bill"):
-                st.session_state["n"] += 1
-                st.rerun()
+    l1, l2 = st.columns(2)
+    if l1.button("＋ 记缴费", type="primary", width="stretch"):
+        open_plain(dlg_bill)
+    if l2.button("＋ 记收入", width="stretch"):
+        open_plain(dlg_income)
     for t in an.bill_status(data, today):
         st.info(t)
-    if data["bills"]:
-        df = pd.DataFrame([{"id": b["id"], "日期": b["date"], "名称": b["name"], "金额": b["amount"], "删除": False}
-                           for b in sorted(data["bills"], key=lambda b: b["date"], reverse=True)])
-        ed = st.data_editor(df, hide_index=True, width="stretch", key=f"bl{len(df)}",
-                            disabled=["id", "日期", "名称", "金额"], column_config={"id": None})
-        if st.button("删除勾选的缴费", key="bldel"):
-            ids = {r["id"] for r in ed.to_dict("records") if r["删除"]}
-            if ids and write(lambda d: d.__setitem__("bills", [b for b in d["bills"] if b["id"] not in ids]), "del bills"):
-                st.rerun()
+    st.write("缴费记录")
+    bl = sorted(data["bills"], key=lambda b: b["date"], reverse=True)
+    if not bl:
+        st.caption("还没有缴费记录。")
+    for b in bl[:20]:
+        a, c = st.columns([5, 1])
+        a.write(f"{b['date']}　{b['name']}　¥{b['amount']:.2f}")
+        if c.button("删", key="bd_" + b["id"]):
+            open_plain(dlg_confirm, "bills", b["id"], f"{b['date']} {b['name']} ¥{b['amount']:.2f}")
+    if len(bl) > 20:
+        st.caption(f"只显示最近 20 条，共 {len(bl)} 条。")
     st.divider()
     st.write("收入记录")
-    i1, i2, i3 = st.columns(3)
-    isrc = i1.text_input("来源", placeholder="工资", key=f"is{n}")
-    idate = i2.date_input("日期", value=today, key=f"id{n}")
-    iamt = i3.number_input("金额", min_value=0.0, value=None, step=100.0, key=f"ia{n}")
-    if st.button("记收入", width="stretch"):
-        if not iamt:
-            st.warning("请填写金额")
-        else:
-            rec = {"id": uid(), "source": isrc.strip() or "收入", "date": str(idate), "amount": float(iamt)}
-            if write(lambda d: d["income"].append(rec), "add income"):
-                st.session_state["n"] += 1
-                st.rerun()
-    if data["income"]:
-        df = pd.DataFrame([{"id": x["id"], "日期": x["date"], "来源": x["source"], "金额": x["amount"], "删除": False}
-                           for x in sorted(data["income"], key=lambda x: x["date"], reverse=True)])
-        ed = st.data_editor(df, hide_index=True, width="stretch", key=f"il{len(df)}",
-                            disabled=["id", "日期", "来源", "金额"], column_config={"id": None})
-        if st.button("删除勾选的收入", key="idel"):
-            ids = {r["id"] for r in ed.to_dict("records") if r["删除"]}
-            if ids and write(lambda d: d.__setitem__("income", [x for x in d["income"] if x["id"] not in ids]), "del income"):
-                st.rerun()
+    il = sorted(data["income"], key=lambda x: x["date"], reverse=True)
+    if not il:
+        st.caption("还没有收入记录。")
+    for x in il[:20]:
+        a, c = st.columns([5, 1])
+        a.write(f"{x['date']}　{x['source']}　¥{x['amount']:.2f}")
+        if c.button("删", key="id_" + x["id"]):
+            open_plain(dlg_confirm, "income", x["id"], f"{x['date']} {x['source']} ¥{x['amount']:.2f}")
 
 # ---------------- 设置 ----------------
 with t_set:
@@ -400,7 +695,7 @@ with t_set:
     al = s1.number_input("涨价提醒阈值（%）", min_value=1.0, value=float(S["alert_pct"]), step=1.0)
     TZS = ["Asia/Shanghai", "Asia/Hong_Kong", "Asia/Tokyo", "America/Los_Angeles", "America/New_York", "Europe/London", "UTC"]
     tz = s2.selectbox("时区", TZS, index=TZS.index(S["tz"]) if S["tz"] in TZS else 0)
-    st.write("分类设置")
+    st.write("分类设置（建议在电脑上改）")
     cdf = pd.DataFrame([{"分类": k, "性质": KIND_LABEL[v.get("kind", "casual")], "超阈值转大件": bool(v.get("thr"))}
                         for k, v in data["categories"].items()])
     ced = st.data_editor(cdf, num_rows="dynamic", hide_index=True, width="stretch", key="cats",
@@ -414,8 +709,9 @@ with t_set:
     if st.button("保存设置", type="primary", width="stretch"):
         newc = {}
         for r in ced.to_dict("records"):
-            if r["分类"] and str(r["分类"]).strip():
-                newc[str(r["分类"]).strip()] = {"kind": KIND_KEY[r["性质"] or "随手消费"], **({"thr": True} if r["超阈值转大件"] else {})}
+            nm = txt(r["分类"])
+            if nm:
+                newc[nm] = {"kind": KIND_KEY[r["性质"] or "随手消费"], **({"thr": True} if r["超阈值转大件"] else {})}
         newb = {r["名称"]: BILL_KEY[r["类型"]] for r in bed.to_dict("records")}
 
         def mut(d):
