@@ -57,11 +57,14 @@ def records(data):
         ex = sum(e["amount"] for e in o.get("extras", []))
         for i in items:
             paid = i["amount"] + (ex * i["amount"] / tot if tot else 0)
+            refund = min(float(i.get("refund") or 0), i["amount"])
             dim, up = unit_price(i["amount"], i.get("qty"), i.get("unit"))
             _, upp = unit_price(paid, i.get("qty"), i.get("unit"))
+            if refund > 0 and refund >= i["amount"] - 1e-9:   # 全额退款：不算一次真实购买，不进价格统计
+                dim, up, upp = None, None, None
             out.append({"date": o["date"], "store": o.get("store", ""), "order": o["id"], "id": i["id"],
                         "item": i["item"], "brand": i.get("brand", ""), "category": i["category"],
-                        "qty": i.get("qty"), "unit": i.get("unit"), "amount": i["amount"], "paid": paid,
+                        "qty": i.get("qty"), "unit": i.get("unit"), "amount": i["amount"], "refund": refund, "net": i["amount"] - refund, "paid": paid,
                         "dim": dim, "up": up, "upp": upp, "kind": kind_of(data, i)})
     return out
 
@@ -204,7 +207,7 @@ def cat_sums(data, recs, ym):
     c = {}
     for r in recs:
         if r["date"][:7] == ym and r["kind"] != "big":
-            c[r["category"]] = c.get(r["category"], 0) + r["amount"]
+            c[r["category"]] = c.get(r["category"], 0) + r["net"]
     return c
 
 
@@ -216,7 +219,7 @@ def month_report(data, ym, mode, today):
     recs = [r for r in allr if r["date"][:7] == ym]
     kinds = {"daily": 0.0, "casual": 0.0, "big": 0.0}
     for r in recs:
-        kinds[r["kind"]] += r["amount"]
+        kinds[r["kind"]] += r["net"]
     extras = sum(e["amount"] for o in data["orders"] if o["date"][:7] == ym for e in o.get("extras", []))
     liv, liv_rows = living(data, ym, mode, today)
     income = sum(x["amount"] for x in data["income"] if x["date"][:7] == ym)
@@ -231,7 +234,7 @@ def month_report(data, ym, mode, today):
         if r["category"] == "交通" and r["kind"] != "big":
             t = tr.setdefault(r["item"], [0, 0.0])
             t[0] += 1
-            t[1] += r["amount"]
+            t[1] += r["net"]
     rep["transport"] = sorted([{"item": k, "n": v[0], "amount": v[1]} for k, v in tr.items()], key=lambda x: -x["amount"])
     rep["advice"] = advice(data, rep, allr, today)
     return rep
@@ -289,7 +292,7 @@ def advice(data, rep, allr, today):
             if t and t["pct"] >= thr:
                 out.append(f"你认的「{item}」近 3 个月涨了 {t['pct']:.0f}%（{t['first']:.2f} → {t['last']:.2f} {LABEL[t['dim']]}），要不要重新考虑")
     if rep["bigs"]:
-        tot12 = sum(r["amount"] for r in allr if r["kind"] == "big" and ym_add(ym, -11) <= r["date"][:7] <= ym)
+        tot12 = sum(r["net"] for r in allr if r["kind"] == "big" and ym_add(ym, -11) <= r["date"][:7] <= ym)
         out.append(f"本月偶发大件 {rep['big']:.0f} 元，已排除在日均和预算之外；近 12 个月大件共 {tot12:.0f} 元")
     if rep["cur"]:
         out += bill_status(data, today)
