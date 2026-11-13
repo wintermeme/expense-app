@@ -9,10 +9,10 @@ import requests
 import streamlit as st
 
 DEFAULT = {
-    "orders": [], "bills": [], "income": [],
+    "orders": [], "bills": [], "income": [], "drafts": [],
     "item_settings": {},
     "categories": {
-        "买菜": {"kind": "daily"}, "肉蛋奶": {"kind": "daily"}, "日用品": {"kind": "daily"},
+        "食材": {"kind": "daily"}, "日用品": {"kind": "daily"},
         "零食饮料（超市）": {"kind": "daily"},
         "外卖堂食": {"kind": "casual"}, "奶茶小吃": {"kind": "casual"},
         "交通": {"kind": "casual"}, "娱乐": {"kind": "casual"},
@@ -38,6 +38,24 @@ def github_conf():
         return None
 
 
+OLD_CATS = {"买菜": "食材", "肉蛋奶": "食材"}
+
+
+def _migrate(d):
+    """把旧分类「买菜」「肉蛋奶」合并成「食材」，历史记录一并改过来。"""
+    for o in d.get("orders", []):
+        for i in o.get("items", []):
+            if i.get("category") in OLD_CATS:
+                i["category"] = OLD_CATS[i["category"]]
+    cats = d.get("categories", {})
+    if any(k in cats for k in OLD_CATS):
+        for k in OLD_CATS:
+            cats.pop(k, None)
+        if "食材" not in cats:
+            d["categories"] = {"食材": {"kind": "daily"}, **cats}
+    return d
+
+
 def _fill(d):
     if not isinstance(d, dict):
         d = {}
@@ -47,7 +65,7 @@ def _fill(d):
         elif isinstance(v, dict) and k in ("settings", "budget"):
             for kk, vv in v.items():
                 d[k].setdefault(kk, vv)
-    return d
+    return _migrate(d)
 
 
 def _url(repo, path):
@@ -71,7 +89,17 @@ def load():
         return _fill({}), None
     r.raise_for_status()
     j = r.json()
-    text = base64.b64decode(j["content"]).decode("utf-8") if j.get("content") else ""
+    if j.get("content"):
+        text = base64.b64decode(j["content"]).decode("utf-8")
+    elif j.get("size", 0) > 0:
+        # 文件超过 1MB 时 GitHub 不在这里返回内容，改用原始内容接口读取（上限约 100MB）
+        r2 = requests.get(_url(repo, path), headers={**_headers(token), "Accept": "application/vnd.github.raw+json"}, timeout=60)
+        r2.raise_for_status()
+        text = r2.text
+        if not text.strip():
+            raise RuntimeError("数据文件很大但读取失败，为避免覆盖已停止，请稍后重试")
+    else:
+        text = ""
     return _fill(json.loads(text) if text.strip() else {}), j["sha"]
 
 
