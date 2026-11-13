@@ -23,6 +23,14 @@ def cut(s, w):
     return out
 
 
+def pad(s, w):
+    return s + " " * max(0, w - dw(s))
+
+
+def rpad(s, w):
+    return " " * max(0, w - dw(s)) + s
+
+
 def center(s):
     return " " * max(0, (W - dw(s)) // 2) + s
 
@@ -51,30 +59,80 @@ def wrap_pairs(pairs):
     return lines
 
 
-def render_day(data, day):
+def day_groups(data, day):
+    """同一天同一店铺的多张订单合并成一组；没填店铺的放最前面，不加店名。"""
+    order, g = [], {}
+    for o in data["orders"]:
+        if o["date"] != day:
+            continue
+        k = o.get("store") or ""
+        if k not in g:
+            g[k] = {"items": [], "extras": {}}
+            order.append(k)
+        g[k]["items"] += o["items"]
+        for e in o.get("extras", []):
+            g[k]["extras"][e["name"]] = g[k]["extras"].get(e["name"], 0) + e["amount"]
+    order.sort(key=lambda k: k != "")
+    return [(k, g[k]["items"], {n: v for n, v in g[k]["extras"].items() if v}) for k in order]
+
+
+def item_row(it):
+    """返回 (名称, 数量文字, 单价文字, 金额)。"""
     from calc import LABEL, unit_price
-    d = dt.date.fromisoformat(day)
-    out = [DSEP, center("每 日 消 费 小 票"), DSEP,
-           f"日期：{day}   周{WEEK[d.weekday()]}", SEP]
-    total, n, cats = 0.0, 0, {}
-    for o in [o for o in data["orders"] if o["date"] == day]:
-        if o.get("store"):
-            out.append(f"[{o['store']}]")
-        for it in o["items"]:
-            n += 1
-            name = it["item"] + (f"·{it['brand']}" if it.get("brand") else "")
-            out.append(line(f"{n:02d} {name}", money(it["amount"])))
-            dim, up = unit_price(it["amount"], it.get("qty"), it.get("unit"))
-            if up is not None:
-                out.append(cut(f"   {it['qty']:g}{it['unit']} x {up:.2f}{LABEL[dim]}", W))
+    name = it["item"] + (f"·{it['brand']}" if it.get("brand") else "")
+    dim, up = unit_price(it["amount"], it.get("qty"), it.get("unit"))
+    qty = f"{it['qty']:g}{it['unit']}" if up is not None else ""
+    price = f"{up:.2f}{LABEL[dim][1:]}" if up is not None else ""
+    return name, qty, price, it["amount"]
+
+
+def day_summary(data, day):
+    groups = day_groups(data, day)
+    n = sum(len(its) for _, its, _ in groups)
+    total, cats = 0.0, {}
+    for _, its, ex in groups:
+        for it in its:
             total += it["amount"]
             cats[it["category"]] = cats.get(it["category"], 0) + it["amount"]
-        for e in o.get("extras", []):
-            out.append(line("   " + e["name"], money(e["amount"])))
-            total += e["amount"]
-            cats["附加费用"] = cats.get("附加费用", 0) + e["amount"]
+        for v in ex.values():
+            total += v
+            cats["附加费用"] = cats.get("附加费用", 0) + v
+    return groups, n, total, cats
+
+
+def wrap_name(s, w):
+    out, cur = [], ""
+    for c in s:
+        if dw(cur + c) > w:
+            out.append(cur)
+            cur = c
+        else:
+            cur += c
+    return out + [cur]
+
+
+def render_day(data, day):
+    """文字版（用于复制、下载）：每件两行，第一行名称和金额，第二行数量 × 单价。"""
+    d = dt.date.fromisoformat(day)
+    groups, n, total, cats = day_summary(data, day)
+    out = [DSEP, center("每 日 消 费 小 票"), DSEP, f"日期：{day}   周{WEEK[d.weekday()]}", SEP,
+           line("物品 / 数量 × 单价", "金额"), SEP]
     if n == 0:
         out.append(center("（今天还没有记录）"))
+    for store, its, ex in groups:
+        if store:
+            out.append(f"[{store}]")
+        for it in its:
+            name, qty, price, amt = item_row(it)
+            parts = wrap_name(name, W - 10)
+            out.append(line(parts[0], money(amt)))
+            out += ["  " + x for x in parts[1:]]
+            if qty:
+                out.append(cut(f"  {qty} × {price}", W))
+        for k, v in ex.items():
+            out.append(line("  " + k, money(v)))
+        if store and (len(its) + len(ex) > 1):
+            out.append(line("  小计", money(sum(i["amount"] for i in its) + sum(ex.values()))))
     out += [SEP, f"共 {n} 笔", line("合计", "¥" + money(total))]
     if cats:
         out.append(SEP)
@@ -85,6 +143,38 @@ def render_day(data, day):
         out += [line("  " + b["name"], money(b["amount"])) for b in bills]
     out += [DSEP, center("谢谢惠顾 · 明天继续记账"), DSEP]
     return "\n".join(out)
+
+
+def render_day_html(data, day):
+    """页面上显示的小票：真正的表格，列对齐由页面保证，不受手机字体影响。"""
+    from html import escape as e
+    d = dt.date.fromisoformat(day)
+    groups, n, total, cats = day_summary(data, day)
+    h = ['<div class="rc"><div class="rc-title">每 日 消 费 小 票</div>',
+         f'<div class="rc-sub">{day}　周{WEEK[d.weekday()]}</div>',
+         '<table><thead><tr><th>物品</th><th>数量</th><th>单价</th><th>金额</th></tr></thead><tbody>']
+    if n == 0:
+        h.append('<tr><td colspan="4" class="rc-empty">今天还没有记录</td></tr>')
+    for store, its, ex in groups:
+        if store:
+            h.append(f'<tr class="rc-store"><td colspan="4">{e(store)}</td></tr>')
+        for it in its:
+            name, qty, price, amt = item_row(it)
+            h.append(f'<tr><td>{e(name)}</td><td>{e(qty)}</td><td>{e(price)}</td><td>{money(amt)}</td></tr>')
+        for k, v in ex.items():
+            h.append(f'<tr class="rc-ex"><td colspan="3">{e(k)}</td><td>{money(v)}</td></tr>')
+        if store and (len(its) + len(ex) > 1):
+            sub = sum(i["amount"] for i in its) + sum(ex.values())
+            h.append(f'<tr class="rc-sub2"><td colspan="3">小计</td><td>{money(sub)}</td></tr>')
+    h.append('</tbody></table>')
+    h.append(f'<div class="rc-total"><span>共 {n} 笔</span><span>合计　¥{money(total)}</span></div>')
+    if cats:
+        h.append('<div class="rc-cats">' + "　|　".join(f"{e(k)} {money(v)}" for k, v in cats.items()) + '</div>')
+    bills = [b for b in data["bills"] if b["date"] == day]
+    if bills:
+        h.append('<div class="rc-cats">生活缴费（不计入合计）：' + "　".join(f"{e(b['name'])} {money(b['amount'])}" for b in bills) + '</div>')
+    h.append('</div>')
+    return "".join(h)
 
 
 def render_month(rep):
