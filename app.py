@@ -1,3 +1,4 @@
+import calendar
 import datetime as dt
 import hmac
 import json
@@ -7,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 import analysis as an
 import calc
@@ -39,6 +41,12 @@ html, body, .stApp, .stApp p, .stApp label, .stApp li, .stApp h1, .stApp h2, .st
 .stApp [data-testid="stMetricValue"], .stApp [data-testid="stCaptionContainer"] {{ font-family: {family} !important; }}
 .stApp code, .stApp pre, .stApp pre * {{ font-family: "SFMono-Regular", Menlo, Consolas, "Sarasa Mono SC", "Noto Sans Mono CJK SC", monospace !important; }}
 .stApp .stButton > button, .stApp .stDownloadButton > button {{ border-radius: 999px; }}
+.st-key-cal [data-testid="stHorizontalBlock"] {{ flex-wrap: nowrap !important; gap: 4px !important; }}
+.st-key-cal [data-testid="stColumn"] {{ min-width: 0 !important; flex: 1 1 0 !important; width: auto !important; }}
+.st-key-cal button {{ min-height: 2.5rem; padding: 0; border: none; background: transparent; border-radius: 10px; }}
+.cal-title {{ text-align: center; font-weight: 600; padding-top: .45rem; }}
+.cal-wk {{ text-align: center; font-size: .8rem; opacity: .6; }}
+.rc tr.rc-refund td {{ color: #c0504d; opacity: .9; }}
 .rc {{ border: 1px dashed rgba(128,128,160,.55); border-radius: 14px; padding: 16px 14px; background: rgba(128,128,160,.07); }}
 .rc-title {{ text-align: center; font-size: 1.15rem; font-weight: 600; letter-spacing: .15em; }}
 .rc-sub {{ text-align: center; opacity: .7; font-size: .85rem; margin: 2px 0 10px; }}
@@ -174,39 +182,91 @@ def opts(base, cur):
     return base + ([cur] if cur and cur not in base else [])
 
 
-def item_fields(p, init, d):
+def run_js(html):
+    """在页面里执行一小段脚本；新版 Streamlit 用 st.iframe，旧版退回 components.html。"""
+    if hasattr(st, "iframe"):
+        st.iframe(html, height=1)
+    else:
+        components.html(html, height=0)
+
+
+NEW = "＋ 手动输入新的"
+
+
+def set_pick(key, value, options):
+    ss = st.session_state
+    if value in options:
+        ss[key + "_sel"] = value
+    elif value:
+        ss[key + "_sel"], ss[key + "_new"] = NEW, value
+    else:
+        ss[key + "_sel"] = None
+
+
+def pick(label, options, key, placeholder="请选择", init=None):
+    """下拉选择，点一下只展开列表，不弹键盘。历史里没有时，选最后一项「＋ 手动输入新的」，再点出现的输入框打字。"""
+    ss = st.session_state
+    base = [o for o in dict.fromkeys(options) if o]
+    if key + "_sel" not in ss:
+        set_pick(key, ss.get(key, init), base)
+    sel = st.selectbox(label, base + [NEW], index=None, placeholder=placeholder, key=key + "_sel")
+    val = txt(st.text_input(label + "（新的）", key=key + "_new", placeholder="点这里输入")) if sel == NEW else sel
+    ss[key] = val or None
+    return ss[key]
+
+
+def item_fields(p, init, d, refund=False):
     """竖着排的一件商品表单。p 是控件 key 前缀。选了物品后，品牌、分类、单位自动带出上次的值。"""
     ss, H, cats = st.session_state, hist(d), list(d["categories"])
-    ss.setdefault(p + "item", init.get("item") or None)
-    ss.setdefault(p + "brand", init.get("brand") or None)
     ss.setdefault(p + "cat", init.get("cat") if init.get("cat") in cats else cats[0])
-    ss.setdefault(p + "qty", init.get("qty") or None)
     ss.setdefault(p + "unit", init.get("unit") or "g")
     ss.setdefault(p + "big", bool(init.get("big")))
     ss.setdefault(p + "last", init.get("item") or None)
     if init.get("amount") is not None:
         ss.setdefault(p + "amount", float(init["amount"]))
-    st.selectbox("物品", opts(H["items"], ss[p + "item"]), index=None, accept_new_options=True,
-                 placeholder="选择历史，或直接输入新的", key=p + "item")
-    cur = ss[p + "item"]
+    cur = pick("物品", H["items"], p + "item", "选择历史物品", init.get("item"))
+    ib = H["ibrands"].get(cur, [])
+    bopts = ib + [b for b in H["brands"] if b not in ib]
     if cur != ss[p + "last"]:
         ss[p + "last"] = cur
         lp = H["last"].get(cur)
         if lp:
-            ss[p + "brand"] = lp["brand"] or None
+            set_pick(p + "brand", lp["brand"] or None, bopts)
             if lp["category"] in cats:
                 ss[p + "cat"] = lp["category"]
             if lp["unit"]:
                 ss[p + "unit"] = lp["unit"]
-    ib = H["ibrands"].get(cur, [])
-    st.selectbox("品牌（可不填）", opts(ib + [b for b in H["brands"] if b not in ib], ss[p + "brand"]), index=None,
-                 accept_new_options=True, placeholder="选择历史，或直接输入", key=p + "brand")
+    pick("品牌（可不填）", bopts, p + "brand", "选择历史品牌", init.get("brand"))
     st.selectbox("分类", cats, key=p + "cat")
-    st.selectbox("数量（可不填）", opts(H["qtys"].get(cur, []), ss[p + "qty"]), index=None, accept_new_options=True,
-                 placeholder="选择历史，或直接输入数字", key=p + "qty")
+    pick("数量（可不填）", H["qtys"].get(cur, []), p + "qty", "选择常用数量", init.get("qty"))
     st.selectbox("单位", calc.UNIT_LIST, key=p + "unit")
     st.number_input("金额（元）", min_value=0.0, value=None, step=0.5, format="%.2f", placeholder="0.00", key=p + "amount")
     st.checkbox("偶发大件，不计入日均", key=p + "big")
+    if refund:
+        ss.setdefault(p + "rmode", init.get("rmode", "无退款"))
+        st.selectbox("退款", ["无退款", "全额退款", "部分退款"], key=p + "rmode")
+        if ss[p + "rmode"] == "部分退款":
+            if init.get("ramt") is not None:
+                ss.setdefault(p + "ramt", float(init["ramt"]))
+            st.number_input("退款金额（元）", min_value=0.0, value=None, step=0.5, format="%.2f",
+                            placeholder="退了多少钱", key=p + "ramt")
+
+
+NOKB = """<script>
+(function () {
+  var doc = window.parent.document;
+  var SEL = 'input[role=combobox], [data-testid=stSelectbox] input, [data-baseweb=select] input, [data-testid=stDateInput] input';
+  var BOX = '[data-testid=stSelectbox], [data-baseweb=select], [data-testid=stDateInput]';
+  var code = "(function(){ if (window.__nokb) return; window.__nokb = 1;" +
+    "var SEL=" + JSON.stringify(SEL) + ", BOX=" + JSON.stringify(BOX) + ";" +
+    "function fix(){ document.querySelectorAll(SEL).forEach(function(i){ if (i.getAttribute('inputmode')!=='none') i.setAttribute('inputmode','none'); }); }" +
+    "function early(e){ var t=e.target; if (t && t.closest) { var b=t.closest(BOX); if (b) b.querySelectorAll('input').forEach(function(i){ i.setAttribute('inputmode','none'); }); } }" +
+    "document.addEventListener('touchstart', early, true); document.addEventListener('mousedown', early, true);" +
+    "new MutationObserver(fix).observe(document.body, {childList:true, subtree:true}); fix(); })();";
+  try { var s = doc.createElement('script'); s.textContent = code; doc.head.appendChild(s); } catch (e) {}
+  doc.querySelectorAll(SEL).forEach(function (i) { i.setAttribute('inputmode', 'none'); });
+})();
+</script>"""
 
 
 def read_item(p, cats):
@@ -258,10 +318,8 @@ def dlg_one():
     ss, d = st.session_state, st.session_state["data"]
     init, H, cats = ss.get("dlg_init", {}), hist(d), list(d["categories"])
     ss.setdefault("dlg_o_date", dt.date.fromisoformat(init["date"]) if init.get("date") else ss["today"])
-    ss.setdefault("dlg_o_store", init.get("store") or None)
     st.date_input("日期", key="dlg_o_date")
-    st.selectbox("店铺（可不填）", opts(H["stores"], ss["dlg_o_store"]), index=None, accept_new_options=True,
-                 placeholder="选择历史，或直接输入", key="dlg_o_store")
+    pick("店铺（可不填）", H["stores"], "dlg_o_store", "选择历史店铺", init.get("store"))
     item_fields("dlg_o_", init, d)
     with st.expander("附加费用（运费、杂费、优惠）"):
         ss.setdefault("dlg_o_ship", init.get("ship") or 0.0)
@@ -295,10 +353,8 @@ def dlg_multi():
     ss, d = st.session_state, st.session_state["data"]
     init, H, cats = ss.get("dlg_init", {}), hist(d), list(d["categories"])
     ss.setdefault("dlg_m_date", dt.date.fromisoformat(init["date"]) if init.get("date") else ss["today"])
-    ss.setdefault("dlg_m_store", init.get("store") or None)
     st.date_input("日期", key="dlg_m_date")
-    st.selectbox("店铺（填一次，整单共用）", opts(H["stores"], ss["dlg_m_store"]), index=None, accept_new_options=True,
-                 placeholder="选择历史，或直接输入", key="dlg_m_store")
+    pick("店铺（填一次，整单共用）", H["stores"], "dlg_m_store", "选择历史店铺", init.get("store"))
     items = ss["dlg_m_items"]
 
     def autosave():
@@ -359,11 +415,9 @@ def dlg_transport():
     ss, d = st.session_state, st.session_state["data"]
     tools, last = transport_hist(d)
     ss.setdefault("dlg_t_date", ss["today"])
-    ss.setdefault("dlg_t_tool", None)
     ss.setdefault("dlg_t_last", None)
     st.date_input("日期", key="dlg_t_date")
-    st.selectbox("交通工具", opts(tools, ss["dlg_t_tool"]), index=None, accept_new_options=True,
-                 placeholder="选择，或直接输入", key="dlg_t_tool")
+    pick("交通工具", tools, "dlg_t_tool", "选择交通工具")
     if ss["dlg_t_tool"] != ss["dlg_t_last"]:
         ss["dlg_t_last"] = ss["dlg_t_tool"]
         if ss["dlg_t_tool"] in last:
@@ -399,11 +453,23 @@ def dlg_edit(rid):
     init = {"item": r["item"], "brand": r["brand"], "cat": r["category"], "unit": r["unit"], "amount": r["amount"],
             "qty": f"{r['qty']:g}" if r["qty"] else None, "big": r["kind"] == "big" and r["category"] in d["categories"]
             and d["categories"][r["category"]].get("kind") != "big"}
+    rf0 = r["refund"]
+    init["rmode"] = "全额退款" if rf0 > 0 and rf0 >= r["amount"] - 1e-9 else ("部分退款" if rf0 > 0 else "无退款")
+    init["ramt"] = rf0 if 0 < rf0 < r["amount"] else None
     st.caption(f"{r['date']}　{r['store']}")
-    item_fields("dlg_e_", init, d)
+    item_fields("dlg_e_", init, d, refund=True)
     c1, c2 = st.columns(2)
     if c1.button("保存修改", type="primary", width="stretch"):
         it, err = read_item("dlg_e_", cats)
+        rf = 0.0
+        if not err:
+            rm = ss.get("dlg_e_rmode", "无退款")
+            if rm == "全额退款":
+                rf = it["amount"]
+            elif rm == "部分退款":
+                rf = round(float(ss.get("dlg_e_ramt") or 0), 2)
+                if not 0 < rf <= it["amount"]:
+                    err = "部分退款金额要大于 0，且不能超过商品金额"
         if err:
             st.warning(err)
         else:
@@ -413,6 +479,10 @@ def dlg_edit(rid):
                         if x["id"] == rid:
                             x.update(item=it["item"], brand=it["brand"], category=it["category"],
                                      amount=it["amount"], big=it["big"])
+                            if rf > 0:
+                                x["refund"] = rf
+                            else:
+                                x.pop("refund", None)
                             x.pop("qty", None)
                             x.pop("unit", None)
                             if "qty" in it:
@@ -444,8 +514,7 @@ def dlg_edit(rid):
 def dlg_cmp():
     ss, d = st.session_state, st.session_state["data"]
     H = hist(d)
-    st.selectbox("品牌", opts(H["brands"], ss.get("dlg_c_brand")), index=None, accept_new_options=True,
-                 placeholder="选择历史，或直接输入", key="dlg_c_brand")
+    pick("品牌", H["brands"], "dlg_c_brand", "选择历史品牌")
     st.number_input("价格（元）", min_value=0.0, value=None, step=0.5, format="%.2f", key="dlg_c_price")
     st.number_input("数量", min_value=0.0, value=None, step=1.0, key="dlg_c_qty")
     ss.setdefault("dlg_c_unit", "g")
@@ -464,8 +533,7 @@ def dlg_bill():
     ss, d = st.session_state, st.session_state["data"]
     names = sorted({b["name"] for b in d["bills"]} | {"房租", "物业", "电费", "水费", "燃气", "网费", "话费"})
     ss.setdefault("dlg_b_date", ss["today"])
-    st.selectbox("名称", opts(names, ss.get("dlg_b_name")), index=None, accept_new_options=True,
-                 placeholder="选择，或直接输入", key="dlg_b_name")
+    pick("名称", names, "dlg_b_name", "选择缴费名称")
     st.date_input("缴费日期", key="dlg_b_date")
     st.number_input("金额（元）", min_value=0.0, value=None, step=10.0, format="%.2f", key="dlg_b_amt")
     if st.button("保存", type="primary", width="stretch"):
@@ -483,8 +551,7 @@ def dlg_income():
     ss, d = st.session_state, st.session_state["data"]
     srcs = list(dict.fromkeys(x["source"] for x in d["income"]))
     ss.setdefault("dlg_i_date", ss["today"])
-    st.selectbox("来源", opts(srcs, ss.get("dlg_i_src")), index=None, accept_new_options=True,
-                 placeholder="比如：工资", key="dlg_i_src")
+    pick("来源", srcs, "dlg_i_src", "选择历史来源，比如工资")
     st.date_input("日期", key="dlg_i_date")
     st.number_input("金额（元）", min_value=0.0, value=None, step=100.0, format="%.2f", key="dlg_i_amt")
     if st.button("保存", type="primary", width="stretch"):
@@ -530,7 +597,8 @@ def open_plain(fn, *args):
 
 
 def lbl(r):
-    return f"{r['item']}{'·' + r['brand'] if r['brand'] else ''}"
+    s = f"{r['item']}{'·' + r['brand'] if r['brand'] else ''}"
+    return s + (f"（已退 {r['refund']:.2f}）" if r["refund"] else "")
 
 
 gate()
@@ -543,6 +611,7 @@ if "data" not in st.session_state:
 data = st.session_state["data"]
 S = data["settings"]
 inject_css(S.get("font", "B"))
+run_js(NOKB)
 try:
     today = dt.datetime.now(ZoneInfo(S.get("tz", "Asia/Shanghai"))).date()
 except Exception:
@@ -553,6 +622,43 @@ if st.session_state.get("flash"):
     st.toast(st.session_state.pop("flash"))
 cats = list(data["categories"])
 recs = an.records(data)
+
+def calendar_pick():
+    """月历：记过账的日子有底色，点哪天就看哪天的小票。"""
+    ss = st.session_state
+    ss.setdefault("cal_sel", str(today))
+    ss.setdefault("cal_month", str(today)[:7])
+    ym = ss["cal_month"]
+    y, m = int(ym[:4]), int(ym[5:])
+    marked = {o["date"] for o in data["orders"]} | {b["date"] for b in data["bills"]}
+    css = [f".st-key-cal_{k} button {{ background: rgba(111,120,184,.30) !important; font-weight: 700; }}"
+           for k in marked if k.startswith(ym)]
+    css.append(f".st-key-cal_{today} button {{ box-shadow: inset 0 0 0 1.5px #6F78B8; }}")
+    css.append(f".st-key-cal_{ss['cal_sel']} button {{ background: #6F78B8 !important; }} "
+               f".st-key-cal_{ss['cal_sel']} button p {{ color: #fff !important; }}")
+    st.markdown("<style>" + "".join(css) + "</style>", unsafe_allow_html=True)
+    with st.container(key="cal"):
+        h1, h2, h3 = st.columns(3)
+        if h1.button("‹", key="cal_prev", width="stretch"):
+            ss["cal_month"] = an.ym_add(ym, -1)
+            st.rerun()
+        h2.markdown(f"<div class='cal-title'>{y} 年 {m} 月</div>", unsafe_allow_html=True)
+        if h3.button("›", key="cal_next", width="stretch"):
+            ss["cal_month"] = an.ym_add(ym, 1)
+            st.rerun()
+        for c, w in zip(st.columns(7), "一二三四五六日"):
+            c.markdown(f"<div class='cal-wk'>{w}</div>", unsafe_allow_html=True)
+        for week in calendar.monthcalendar(y, m):
+            for c, dd in zip(st.columns(7), week):
+                if dd and c.button(str(dd), key=f"cal_{y:04d}-{m:02d}-{dd:02d}", width="stretch"):
+                    ss["cal_sel"] = f"{y:04d}-{m:02d}-{dd:02d}"
+                    st.rerun()
+    st.caption("有底色的日子记过账；深色的是当前查看的日子，带框的是今天。")
+    if st.button("回到今天", width="stretch", key="cal_today"):
+        ss["cal_sel"], ss["cal_month"] = str(today), str(today)[:7]
+        st.rerun()
+    return dt.date.fromisoformat(ss["cal_sel"])
+
 
 t_add, t_rc, t_cmp, t_price, t_rep, t_life, t_set = st.tabs(["记账", "小票", "比价", "价格", "月报", "生活", "设置"])
 
@@ -583,13 +689,13 @@ with t_add:
                     if write(lambda d, i=dr["id"]: d.__setitem__("drafts", [x for x in d["drafts"] if x["id"] != i]), "del draft"):
                         st.rerun()
     trs = [r for r in recs if r["date"] == str(today)]
-    st.caption(f"今天已记 ¥{sum(r['amount'] for r in trs):.2f}，共 {len(trs)} 件")
+    st.caption(f"今天已记 ¥{sum(r['net'] for r in trs):.2f}，共 {len(trs)} 件")
     for r in trs[-6:][::-1]:
-        st.write(f"· {lbl(r)}　¥{r['amount']:.2f}")
+        st.write(f"· {lbl(r)}　¥{r['net']:.2f}")
 
 # ---------------- 小票 ----------------
 with t_rc:
-    rday = st.date_input("日期", value=today, key="rday")
+    rday = calendar_pick()
     rtxt = receipt.render_day(data, str(rday))
     st.markdown(receipt.render_day_html(data, str(rday)), unsafe_allow_html=True)
     with st.expander("文字版（复制 / 下载）"):
@@ -601,7 +707,7 @@ with t_rc:
             st.caption("这一天没有记录。")
         for r in drs:
             a, b = st.columns([5, 1])
-            a.write(f"{lbl(r)}　¥{r['amount']:.2f}")
+            a.write(f"{lbl(r)}　¥{r['net']:.2f}")
             if b.button("改", key="ed_" + r["id"]):
                 clear_dlg()
                 dlg_edit(r["id"])
@@ -710,7 +816,7 @@ with t_rep:
                      hide_index=True, width="stretch")
     if rep["bigs"]:
         st.write("偶发大件明细")
-        st.dataframe(pd.DataFrame([{"日期": r["date"], "物品": r["item"], "金额": r["amount"]} for r in rep["bigs"]]),
+        st.dataframe(pd.DataFrame([{"日期": r["date"], "物品": r["item"], "金额": r["net"]} for r in rep["bigs"]]),
                      hide_index=True, width="stretch")
     if rep["living_rows"]:
         st.write("生活成本明细")
