@@ -226,6 +226,13 @@ def month_report(data, ym, mode, today):
            "big": kinds["big"], "extras": extras, "living": liv, "living_rows": liv_rows, "income": income,
            "run": run, "spend": spend, "balance": income - spend, "day_avg": run / days if days else 0,
            "cats": cat_sums(data, allr, ym), "bigs": [r for r in recs if r["kind"] == "big"]}
+    tr = {}
+    for r in recs:
+        if r["category"] == "交通" and r["kind"] != "big":
+            t = tr.setdefault(r["item"], [0, 0.0])
+            t[0] += 1
+            t[1] += r["amount"]
+    rep["transport"] = sorted([{"item": k, "n": v[0], "amount": v[1]} for k, v in tr.items()], key=lambda x: -x["amount"])
     rep["advice"] = advice(data, rep, allr, today)
     return rep
 
