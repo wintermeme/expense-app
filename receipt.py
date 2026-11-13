@@ -92,11 +92,13 @@ def day_summary(data, day):
     total, cats = 0.0, {}
     for _, its, ex in groups:
         for it in its:
-            total += it["amount"]
-            cats[it["category"]] = cats.get(it["category"], 0) + it["amount"]
+            net = it["amount"] - (it.get("refund") or 0)
+            total += net
+            cats[it["category"]] = cats.get(it["category"], 0) + net
         for v in ex.values():
             total += v
             cats["附加费用"] = cats.get("附加费用", 0) + v
+    cats = {k: v for k, v in cats.items() if abs(v) > 0.004}
     return groups, n, total, cats
 
 
@@ -129,10 +131,12 @@ def render_day(data, day):
             out += ["  " + x for x in parts[1:]]
             if qty:
                 out.append(cut(f"  {qty} × {price}", W))
+            if it.get("refund"):
+                out.append(line("  退款", "-" + money(it["refund"])))
         for k, v in ex.items():
             out.append(line("  " + k, money(v)))
         if store and (len(its) + len(ex) > 1):
-            out.append(line("  小计", money(sum(i["amount"] for i in its) + sum(ex.values()))))
+            out.append(line("  小计", money(sum(i["amount"] - (i.get("refund") or 0) for i in its) + sum(ex.values()))))
     out += [SEP, f"共 {n} 笔", line("合计", "¥" + money(total))]
     if cats:
         out.append(SEP)
@@ -161,10 +165,12 @@ def render_day_html(data, day):
         for it in its:
             name, qty, price, amt = item_row(it)
             h.append(f'<tr><td>{e(name)}</td><td>{e(qty)}</td><td>{e(price)}</td><td>{money(amt)}</td></tr>')
+            if it.get("refund"):
+                h.append(f'<tr class="rc-refund"><td colspan="3">　退款</td><td>-{money(it["refund"])}</td></tr>')
         for k, v in ex.items():
             h.append(f'<tr class="rc-ex"><td colspan="3">{e(k)}</td><td>{money(v)}</td></tr>')
         if store and (len(its) + len(ex) > 1):
-            sub = sum(i["amount"] for i in its) + sum(ex.values())
+            sub = sum(i["amount"] - (i.get("refund") or 0) for i in its) + sum(ex.values())
             h.append(f'<tr class="rc-sub2"><td colspan="3">小计</td><td>{money(sub)}</td></tr>')
     h.append('</tbody></table>')
     h.append(f'<div class="rc-total"><span>共 {n} 笔</span><span>合计　¥{money(total)}</span></div>')
