@@ -39,6 +39,20 @@ html, body, .stApp, .stApp p, .stApp label, .stApp li, .stApp h1, .stApp h2, .st
 .stApp [data-testid="stMetricValue"], .stApp [data-testid="stCaptionContainer"] {{ font-family: {family} !important; }}
 .stApp code, .stApp pre, .stApp pre * {{ font-family: "SFMono-Regular", Menlo, Consolas, "Sarasa Mono SC", "Noto Sans Mono CJK SC", monospace !important; }}
 .stApp .stButton > button, .stApp .stDownloadButton > button {{ border-radius: 999px; }}
+.rc {{ border: 1px dashed rgba(128,128,160,.55); border-radius: 14px; padding: 16px 14px; background: rgba(128,128,160,.07); }}
+.rc-title {{ text-align: center; font-size: 1.15rem; font-weight: 600; letter-spacing: .15em; }}
+.rc-sub {{ text-align: center; opacity: .7; font-size: .85rem; margin: 2px 0 10px; }}
+.rc table {{ width: 100%; border-collapse: collapse; font-size: .92rem; font-variant-numeric: tabular-nums; }}
+.rc th {{ text-align: left; font-weight: 600; opacity: .75; padding: 6px 4px; border-top: 1px dashed rgba(128,128,160,.55); border-bottom: 1px dashed rgba(128,128,160,.55); }}
+.rc td {{ padding: 5px 4px; vertical-align: top; }}
+.rc th:nth-child(n+2), .rc td:nth-child(n+2) {{ text-align: right; white-space: nowrap; }}
+.rc td:first-child {{ word-break: break-all; }}
+.rc tr.rc-store td {{ font-weight: 600; padding-top: 10px; text-align: left; opacity: .9; }}
+.rc tr.rc-ex td, .rc tr.rc-sub2 td {{ opacity: .75; }}
+.rc tr.rc-sub2 td {{ border-top: 1px dotted rgba(128,128,160,.45); }}
+.rc .rc-empty {{ text-align: center !important; opacity: .6; padding: 14px; }}
+.rc-total {{ display: flex; justify-content: space-between; font-weight: 600; font-size: 1.05rem; border-top: 1px dashed rgba(128,128,160,.55); margin-top: 8px; padding-top: 8px; }}
+.rc-cats {{ margin-top: 8px; font-size: .82rem; opacity: .75; }}
 .stApp [data-baseweb="tab-list"] {{ gap: 4px; overflow-x: auto; }}
 .block-container {{ padding-top: 4.5rem; max-width: 760px; }}
 @media (max-width: 640px) {{
@@ -126,6 +140,8 @@ def hist(d):
         if o.get("store"):
             sc[o["store"]] += 1
         for i in o["items"]:
+            if i["category"] == "交通":
+                continue
             ic[i["item"]] += 1
             last[i["item"]] = {"brand": i.get("brand", ""), "category": i["category"], "unit": i.get("unit")}
             if i.get("brand"):
@@ -137,6 +153,20 @@ def hist(d):
             "items": [k for k, _ in ic.most_common()], "last": last,
             "ibrands": {k: [b for b, _ in v.most_common()] for k, v in ibr.items()},
             "qtys": {k: list(dict.fromkeys(reversed(v)))[:6] for k, v in qtys.items()}}
+
+
+TRANSPORT = ["地铁", "公交", "打车", "共享单车", "高铁火车", "飞机", "其他"]
+
+
+def transport_hist(d):
+    cnt, last = Counter(), {}
+    for o in sorted(d["orders"], key=lambda o: o["date"]):
+        for i in o["items"]:
+            if i["category"] == "交通":
+                cnt[i["item"]] += 1
+                last[i["item"]] = i["amount"]
+    tools = [k for k, _ in cnt.most_common()]
+    return tools + [t for t in TRANSPORT if t not in tools], last
 
 
 def opts(base, cur):
@@ -324,6 +354,40 @@ def dlg_multi():
             st.rerun()
 
 
+@st.dialog("记交通")
+def dlg_transport():
+    ss, d = st.session_state, st.session_state["data"]
+    tools, last = transport_hist(d)
+    ss.setdefault("dlg_t_date", ss["today"])
+    ss.setdefault("dlg_t_tool", None)
+    ss.setdefault("dlg_t_last", None)
+    st.date_input("日期", key="dlg_t_date")
+    st.selectbox("交通工具", opts(tools, ss["dlg_t_tool"]), index=None, accept_new_options=True,
+                 placeholder="选择，或直接输入", key="dlg_t_tool")
+    if ss["dlg_t_tool"] != ss["dlg_t_last"]:
+        ss["dlg_t_last"] = ss["dlg_t_tool"]
+        if ss["dlg_t_tool"] in last:
+            ss["dlg_t_amount"] = float(last[ss["dlg_t_tool"]])
+    st.number_input("金额（元）", min_value=0.0, value=None, step=0.5, format="%.2f", placeholder="0.00", key="dlg_t_amount")
+    if ss["dlg_t_tool"] in last:
+        st.caption("金额已自动带出上次的值，不一样的话直接改。")
+    if st.button("保存", type="primary", width="stretch"):
+        tool = txt(ss.get("dlg_t_tool"))
+        if not tool or not ss.get("dlg_t_amount"):
+            st.warning("请选择交通工具并填写金额")
+        else:
+            order = {"id": uid(), "date": str(ss["dlg_t_date"]), "store": "", "extras": [],
+                     "items": [{"id": uid(), "item": tool, "brand": "", "category": "交通",
+                                "amount": round(float(ss["dlg_t_amount"]), 2), "big": False}]}
+
+            def mut(dd):
+                dd["categories"].setdefault("交通", {"kind": "casual"})
+                dd["orders"].append(order)
+            if write(mut, "add transport"):
+                ss["flash"] = "已记录交通 ✓"
+                st.rerun()
+
+
 @st.dialog("编辑这一件")
 def dlg_edit(rid):
     ss, d = st.session_state, st.session_state["data"]
@@ -499,6 +563,8 @@ with t_add:
         open_one()
     if b2.button("＋ 记多件", width="stretch"):
         open_multi()
+    if st.button("＋ 交通", width="stretch"):
+        open_plain(dlg_transport)
     drafts = data["drafts"]
     if drafts:
         with st.expander(f"草稿箱（{len(drafts)}）"):
@@ -525,8 +591,10 @@ with t_add:
 with t_rc:
     rday = st.date_input("日期", value=today, key="rday")
     rtxt = receipt.render_day(data, str(rday))
-    st.code(rtxt, language=None)
-    st.download_button("下载 .txt", rtxt, file_name=f"小票-{rday}.txt", width="stretch")
+    st.markdown(receipt.render_day_html(data, str(rday)), unsafe_allow_html=True)
+    with st.expander("文字版（复制 / 下载）"):
+        st.code(rtxt, language=None)
+        st.download_button("下载 .txt", rtxt, file_name=f"小票-{rday}.txt", width="stretch")
     drs = [r for r in recs if r["date"] == str(rday)]
     with st.expander(f"修改 / 删除当天记录（{len(drs)}）"):
         if not drs:
@@ -635,6 +703,11 @@ with t_rep:
         cdf = pd.DataFrame([{"分类": k, "金额": v, "占比": f"{v / rep['run'] * 100:.0f}%" if rep["run"] else ""}
                             for k, v in sorted(rep["cats"].items(), key=lambda x: -x[1])])
         st.dataframe(cdf.round(2), hide_index=True, width="stretch")
+    if rep["transport"]:
+        st.write(f"交通明细（共 ¥{sum(x['amount'] for x in rep['transport']):.2f}）")
+        st.dataframe(pd.DataFrame([{"交通工具": x["item"], "次数": x["n"], "金额": round(x["amount"], 2),
+                                    "平均每次": round(x["amount"] / x["n"], 2)} for x in rep["transport"]]),
+                     hide_index=True, width="stretch")
     if rep["bigs"]:
         st.write("偶发大件明细")
         st.dataframe(pd.DataFrame([{"日期": r["date"], "物品": r["item"], "金额": r["amount"]} for r in rep["bigs"]]),
