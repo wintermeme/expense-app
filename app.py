@@ -252,19 +252,61 @@ def item_fields(p, init, d, refund=False):
                             placeholder="退了多少钱", key=p + "ramt")
 
 
-NOKB = """<script>
+NOKB = r"""<script>
 (function () {
-  var doc = window.parent.document;
-  var SEL = 'input[role=combobox], [data-testid=stSelectbox] input, [data-baseweb=select] input, [data-testid=stDateInput] input';
-  var BOX = '[data-testid=stSelectbox], [data-baseweb=select], [data-testid=stDateInput]';
-  var code = "(function(){ if (window.__nokb) return; window.__nokb = 1;" +
-    "var SEL=" + JSON.stringify(SEL) + ", BOX=" + JSON.stringify(BOX) + ";" +
-    "function fix(){ document.querySelectorAll(SEL).forEach(function(i){ if (i.getAttribute('inputmode')!=='none') i.setAttribute('inputmode','none'); }); }" +
-    "function early(e){ var t=e.target; if (t && t.closest) { var b=t.closest(BOX); if (b) b.querySelectorAll('input').forEach(function(i){ i.setAttribute('inputmode','none'); }); } }" +
-    "document.addEventListener('touchstart', early, true); document.addEventListener('mousedown', early, true);" +
-    "new MutationObserver(fix).observe(document.body, {childList:true, subtree:true}); fix(); })();";
-  try { var s = doc.createElement('script'); s.textContent = code; doc.head.appendChild(s); } catch (e) {}
-  doc.querySelectorAll(SEL).forEach(function (i) { i.setAttribute('inputmode', 'none'); });
+  var P = window.parent, doc = P.document;
+  P.__marked = __MARKED__;
+  function persistent() {
+    if (window.__nokb) return;
+    window.__nokb = 1;
+    var SEL = 'input[role=combobox], [data-testid=stSelectbox] input, [data-baseweb=select] input, [data-testid=stDateInput] input';
+    var BOX = '[data-testid=stSelectbox], [data-baseweb=select], [data-testid=stDateInput]';
+    var NAMES = {january:1,february:2,march:3,april:4,may:5,june:6,july:7,august:8,september:9,october:10,november:11,december:12};
+    function fix() {
+      document.querySelectorAll(SEL).forEach(function (i) {
+        if (i.getAttribute('inputmode') !== 'none') i.setAttribute('inputmode', 'none');
+      });
+    }
+    function early(e) {
+      var t = e.target;
+      if (t && t.closest) {
+        var b = t.closest(BOX);
+        if (b) b.querySelectorAll('input').forEach(function (i) { i.setAttribute('inputmode', 'none'); });
+      }
+    }
+    function iso(label) {
+      var y, mo, d, m = label.match(/(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
+      if (m) { y = m[1]; mo = m[2]; d = m[3]; }
+      else {
+        m = label.match(/([A-Za-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})/);
+        if (!m || !NAMES[m[1].toLowerCase()]) return null;
+        mo = NAMES[m[1].toLowerCase()]; d = m[2]; y = m[3];
+      }
+      return y + '-' + ('0' + mo).slice(-2) + '-' + ('0' + d).slice(-2);
+    }
+    function markDays() {
+      var set = window.__marked || [];
+      document.querySelectorAll('[role=gridcell] [role=button][aria-label]').forEach(function (b) {
+        var key = iso(b.getAttribute('aria-label') || '');
+        var has = !!key && set.indexOf(key) >= 0;
+        var sel = b.hasAttribute('data-selected');
+        b.style.background = has && !sel ? 'rgba(111,120,184,.32)' : '';
+        b.style.fontWeight = has ? '700' : '';
+        b.style.borderRadius = has && !sel ? '6px' : '';
+        b.style.boxShadow = b.hasAttribute('data-today') && !sel ? 'inset 0 0 0 1.5px #6F78B8' : '';
+      });
+    }
+    window.__markDays = markDays;
+    document.addEventListener('touchstart', early, true);
+    document.addEventListener('mousedown', early, true);
+    new MutationObserver(function () { fix(); markDays(); }).observe(document.body, {childList: true, subtree: true});
+    fix(); markDays();
+  }
+  if (P.__nokb) {
+    if (P.__markDays) P.__markDays();
+  } else {
+    try { var s = doc.createElement('script'); s.textContent = '(' + persistent.toString() + ')();'; doc.head.appendChild(s); } catch (e) {}
+  }
 })();
 </script>"""
 
@@ -611,7 +653,7 @@ if "data" not in st.session_state:
 data = st.session_state["data"]
 S = data["settings"]
 inject_css(S.get("font", "B"))
-run_js(NOKB)
+run_js(NOKB.replace("__MARKED__", json.dumps(sorted({o["date"] for o in data["orders"]} | {b["date"] for b in data["bills"]}))))
 try:
     today = dt.datetime.now(ZoneInfo(S.get("tz", "Asia/Shanghai"))).date()
 except Exception:
@@ -637,6 +679,7 @@ def calendar_pick():
     css.append(f".st-key-cal_{ss['cal_sel']} button {{ background: #6F78B8 !important; }} "
                f".st-key-cal_{ss['cal_sel']} button p {{ color: #fff !important; }}")
     st.markdown("<style>" + "".join(css) + "</style>", unsafe_allow_html=True)
+    st.markdown("日期", help="有底色的日子记过账；深色是当前查看的日子，带框的是今天")
     with st.container(key="cal"):
         h1, h2, h3 = st.columns(3)
         if h1.button("‹", key="cal_prev", width="stretch"):
@@ -653,7 +696,6 @@ def calendar_pick():
                 if dd and c.button(str(dd), key=f"cal_{y:04d}-{m:02d}-{dd:02d}", width="stretch"):
                     ss["cal_sel"] = f"{y:04d}-{m:02d}-{dd:02d}"
                     st.rerun()
-    st.caption("有底色的日子记过账；深色的是当前查看的日子，带框的是今天。")
     if st.button("回到今天", width="stretch", key="cal_today"):
         ss["cal_sel"], ss["cal_month"] = str(today), str(today)[:7]
         st.rerun()
