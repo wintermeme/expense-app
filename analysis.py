@@ -2,7 +2,7 @@
 import calendar
 import datetime as dt
 
-from calc import LABEL, unit_price
+from calc import LABEL, unit_info, unit_price
 
 DEFAULT_MONTHS = {"房租": 3, "物业": 3, "网费": 1, "话费": 1}
 KIND_NAME = {"daily": "日常消耗", "casual": "随手消费", "big": "偶发大件"}
@@ -158,31 +158,52 @@ def cash_avg(bs):
     return sum(b["amount"] for b in bs[:-1]) / span * 30.4
 
 
-def living(data, ym, mode, today):
-    rows, total = [], 0.0
+def iter_months(start, end):
+    ym, last = ym_of(start), ym_of(end)
+    while ym <= last:
+        y, m = int(ym[:4]), int(ym[5:])
+        yield ym, dt.date(y, m, 1), dt.date(y, m, ym_days(ym))
+        ym = ym_add(ym, 1)
+
+
+def overlap_days(a, b, c, d):
+    """闭区间 [a,b] 与 [c,d] 重叠的天数。"""
+    return max(0, (min(b, d) - max(a, c)).days + 1)
+
+
+def living_range(data, start, end, mode, today):
+    """生活成本：摊销类按天分摊，水电气按月均参考；现金口径按缴费日。适用于任意起止日期。"""
+    acc = {}
+    eom = dt.date(today.year, today.month, ym_days(ym_of(today)))   # 当月月底：和摊销一样，当月整月都按月均计入
+
+    def add(name, v, note):
+        acc[(name, note)] = acc.get((name, note), 0) + v
+
     if mode == "cash":
-        for name in sorted({b["name"] for b in data["bills"]}):
-            v = sum(b["amount"] for b in bills_of(data, name) if b["date"][:7] == ym)
-            if v:
-                rows.append((name, v, "实缴"))
-                total += v
-        return total, rows
-    for name, s, e, amt, est in spans(data):
-        v = spread(s, e, amt).get(ym, 0)
-        if v > 0.005:
-            rows.append((name, v, "预估" if est else "摊销"))
-            total += v
-    for name in sorted({b["name"] for b in data["bills"] if bill_kind(data, b["name"]) == "cash"}):
-        bs = bills_of(data, name)
-        actual = sum(b["amount"] for b in bs if b["date"][:7] == ym)
-        avg = cash_avg(bs)
-        if avg is not None and bs[0]["date"][:7] <= ym <= ym_of(today):
-            rows.append((name, avg, f"月均参考（本月实缴 {actual:.0f}）"))
-            total += avg
-        elif actual:
-            rows.append((name, actual, "实缴"))
-            total += actual
-    return total, rows
+        for b in data["bills"]:
+            if start <= D(b["date"]) <= end:
+                add(b["name"], b["amount"], "实缴")
+    else:
+        one = dt.timedelta(days=1)
+        for name, s, e, amt, est in spans(data):
+            ov = overlap_days(s, e - one, start, end)
+            if ov:
+                add(name, amt * ov / (e - s).days, "预估" if est else "摊销")
+        for name in sorted({b["name"] for b in data["bills"] if bill_kind(data, b["name"]) == "cash"}):
+            bs = bills_of(data, name)
+            actual = sum(b["amount"] for b in bs if start <= D(b["date"]) <= end)
+            avg = cash_avg(bs)
+            v = 0.0
+            if avg is not None:
+                first = D(bs[0]["date"]).replace(day=1)
+                for ym, ms, me in iter_months(start, end):
+                    v += avg * overlap_days(max(start, ms), min(end, me), first, eom) / ym_days(ym)
+            if v > 0.005:
+                add(name, v, f"月均参考（期内实缴 {actual:.0f}）")
+            elif actual:
+                add(name, actual, "实缴")
+    rows = [(n, v, note) for (n, note), v in sorted(acc.items())]
+    return sum(v for _, v, _ in rows), rows
 
 
 def bill_status(data, today):
@@ -202,98 +223,203 @@ def bill_status(data, today):
     return out
 
 
-# ---------- 月报 ----------
-def cat_sums(data, recs, ym):
-    c = {}
+# ---------- 用量追踪 ----------
+def _avg(xs):
+    return sum(xs) / len(xs) if xs else None
+
+
+def tracker_rows(data, today):
+    rows = []
+    for t in data.get("trackers", []):
+        s = D(t["start"])
+        e = D(t["end"]) if t.get("end") else None
+        days = max(1, (e - s).days) if e else (today - s).days
+        info = unit_info(t.get("unit"))
+        base = t["qty"] * info[1] if (t.get("qty") and info) else None
+        rows.append({**t, "done": e is not None, "days": days, "dim": info[0] if info else None, "base": base,
+                     "rate": base / days if (e and base) else None, "cost_day": t["amount"] / days if e else None})
+    return rows
+
+
+def tracker_expect(rows, t):
+    """同一物品以往用完的记录，估计这一件大概能用多少天；没有以往记录返回 None。"""
+    prev = [r for r in rows if r["done"] and r["item"] == t["item"] and r["id"] != t["id"]]
+    if not prev:
+        return None
+    rates = [r["rate"] for r in prev if r["rate"] and r["dim"] == t["dim"]]
+    if t["base"] and rates:
+        return t["base"] / _avg(rates)
+    return _avg([r["days"] for r in prev])
+
+
+def tracker_notes(data, today, start=None, end=None):
+    """温馨提示：新用完的和以往比快了还是慢了；使用中的快用完了或比平时久。"""
+    rows, out = tracker_rows(data, today), []
+    fin = [r for r in rows if r["done"]]
+    for t in sorted(fin, key=lambda r: r["end"]):
+        if start and not (str(start) <= t["end"] <= str(end)):
+            continue
+        prev = [r for r in fin if r["item"] == t["item"] and r["end"] < t["end"]]
+        if not prev:
+            continue
+        rates = [r["rate"] for r in prev if r["rate"] and r["dim"] == t["dim"]]
+        avgd = _avg([r["days"] for r in prev])
+        if t["rate"] and rates:
+            ratio, basis = t["rate"] / _avg(rates), "（按每天用量算）"
+        else:
+            ratio, basis = avgd / t["days"], ""
+        if ratio >= 1.25:
+            out.append(f"「{t['item']}」这次用了 {t['days']} 天，比以往（平均约 {avgd:.0f} 天）用得快约 {(ratio - 1) * 100:.0f}%{basis}，是不是用量变大了？")
+        elif ratio <= 0.8:
+            out.append(f"「{t['item']}」这次用了 {t['days']} 天，比以往（平均约 {avgd:.0f} 天）用得慢约 {(1 - ratio) * 100:.0f}%{basis}，用量变少了，留意保质期或是不是买多了。")
+    if start is None or start <= today <= end:
+        for t in [r for r in rows if not r["done"]]:
+            exp = tracker_expect(rows, t)
+            if not exp:
+                continue
+            if t["days"] >= exp * 1.2:
+                out.append(f"「{t['item']}」已经用了 {t['days']} 天，比以往（约 {exp:.0f} 天）久，可能用得比平时慢；用完了记得点「已用完」。")
+            elif t["days"] >= exp * 0.85:
+                out.append(f"「{t['item']}」按以往的速度快用完了（约 {exp:.0f} 天），留意补货。")
+    return out
+
+
+# ---------- 时间段报告（周 / 月 / 季度 / 半年 / 年 / 自定义） ----------
+def cat_sums_range(recs, start, end):
+    S, E, c = str(start), str(end), {}
     for r in recs:
-        if r["date"][:7] == ym and r["kind"] != "big":
+        if S <= r["date"] <= E and r["kind"] != "big":
             c[r["category"]] = c.get(r["category"], 0) + r["net"]
     return c
 
 
-def month_report(data, ym, mode, today):
-    cur = ym == ym_of(today)
-    dim = ym_days(ym)
-    days = today.day if cur else dim
+def period_report(data, start, end, mode, today, title=""):
+    total_days = (end - start).days + 1
+    cur = start <= today <= end
+    days = max(1, (min(end, today) - start).days + 1) if start <= today else total_days
     allr = records(data)
-    recs = [r for r in allr if r["date"][:7] == ym]
+    S, E = str(start), str(end)
+    recs = [r for r in allr if S <= r["date"] <= E]
     kinds = {"daily": 0.0, "casual": 0.0, "big": 0.0}
     for r in recs:
         kinds[r["kind"]] += r["net"]
-    extras = sum(e["amount"] for o in data["orders"] if o["date"][:7] == ym for e in o.get("extras", []))
-    liv, liv_rows = living(data, ym, mode, today)
-    income = sum(x["amount"] for x in data["income"] if x["date"][:7] == ym)
+    extras = sum(e["amount"] for o in data["orders"] if S <= o["date"] <= E for e in o.get("extras", []))
+    liv, liv_rows = living_range(data, start, end, mode, today)
+    income = sum(x["amount"] for x in data["income"] if S <= x["date"] <= E)
     run = kinds["daily"] + kinds["casual"] + extras
     spend = run + kinds["big"] + liv
-    rep = {"ym": ym, "cur": cur, "days": days, "daily": kinds["daily"], "casual": kinds["casual"],
-           "big": kinds["big"], "extras": extras, "living": liv, "living_rows": liv_rows, "income": income,
-           "run": run, "spend": spend, "balance": income - spend, "day_avg": run / days if days else 0,
-           "cats": cat_sums(data, allr, ym), "bigs": [r for r in recs if r["kind"] == "big"]}
+    bud = data["budget"].get("monthly") or 0
+    bud_total = sum(bud * overlap_days(max(start, ms), min(end, me), ms, me) / ym_days(ym)
+                    for ym, ms, me in iter_months(start, end)) if bud else 0
     tr = {}
     for r in recs:
         if r["category"] == "交通" and r["kind"] != "big":
             t = tr.setdefault(r["item"], [0, 0.0])
             t[0] += 1
             t[1] += r["net"]
-    rep["transport"] = sorted([{"item": k, "n": v[0], "amount": v[1]} for k, v in tr.items()], key=lambda x: -x["amount"])
+    rep = {"title": title or f"{start} ~ {end}", "start": start, "end": end, "ym": S[:7], "cur": cur, "days": days,
+           "total_days": total_days, "daily": kinds["daily"], "casual": kinds["casual"], "big": kinds["big"],
+           "extras": extras, "living": liv, "living_rows": liv_rows, "income": income, "run": run, "spend": spend,
+           "balance": income - spend, "day_avg": run / days if days else 0, "budget_total": bud_total,
+           "cats": cat_sums_range(allr, start, end),
+           "bigs": [r for r in recs if r["kind"] == "big" and r["net"] > 0],
+           "transport": sorted([{"item": k, "n": v[0], "amount": v[1]} for k, v in tr.items()], key=lambda x: -x["amount"])}
     rep["advice"] = advice(data, rep, allr, today)
     return rep
 
 
+def month_report(data, ym, mode, today):
+    y, m = int(ym[:4]), int(ym[5:])
+    return period_report(data, dt.date(y, m, 1), dt.date(y, m, ym_days(ym)), mode, today, title=f"{y}年{m}月")
+
+
+def trend(data, rep, mode, today):
+    """走势：时间段不超过 31 天按天，否则按月；每格拆成日常 / 随手 / 附加 / 大件（按月时再加生活成本）。"""
+    start, end = rep["start"], rep["end"]
+    daily = rep["total_days"] <= 31
+    S, E = str(start), str(end)
+    key = (lambda s: s[5:]) if daily else (lambda s: s[:7])
+    order = []
+    if daily:
+        d = start
+        while d <= end:
+            order.append((str(d)[5:], d, d))
+            d += dt.timedelta(days=1)
+    else:
+        order = [(ym, max(start, ms), min(end, me)) for ym, ms, me in iter_months(start, end)]
+    agg = {k: {"日常消耗": 0.0, "随手消费": 0.0, "附加费用": 0.0, "偶发大件": 0.0} for k, _, _ in order}
+    name = {"daily": "日常消耗", "casual": "随手消费", "big": "偶发大件"}
+    for r in records(data):
+        if S <= r["date"] <= E:
+            agg[key(r["date"])][name[r["kind"]]] += r["net"]
+    for o in data["orders"]:
+        if S <= o["date"] <= E:
+            agg[key(o["date"])]["附加费用"] += sum(e["amount"] for e in o.get("extras", []))
+    rows = []
+    for k, a, b in order:
+        row = {"期间": k, **agg[k]}
+        if not daily:
+            row["生活成本"] = living_range(data, a, b, mode, today)[0]
+        rows.append(row)
+    return rows
+
+
 def advice(data, rep, allr, today):
-    ym, out = rep["ym"], []
-    first = min([r["date"] for r in allr] + [b["date"] for b in data["bills"]] or ["9999"])
-    if first[:7] == ym:
-        out.append("这是你记账的第一个月，数据不完整，下面的对比和结论仅供参考。")
-    bud = data["budget"].get("monthly") or 0
-    if bud:
-        pct = rep["run"] / bud * 100
-        msg = f"本月日常开销已用预算 {pct:.0f}%（{rep['run']:.0f} / {bud:.0f} 元，不含偶发大件和生活成本）"
-        if rep["cur"] and rep["days"] >= 5:
-            proj = rep["run"] / rep["days"] * ym_days(ym)
-            if proj > bud:
-                msg += f"；按目前速度月底约 {proj:.0f} 元，会超支约 {proj - bud:.0f} 元"
+    start, end, out = rep["start"], rep["end"], []
+    S, E = str(start), str(end)
+    ref = min(end, today)
+    dates = [r["date"] for r in allr] + [b["date"] for b in data["bills"]]
+    if dates and D(min(dates)) > start:
+        out.append(f"你的记账从 {min(dates)} 开始，这段时间的数据不完整，下面的对比和结论仅供参考。")
+    bt = rep["budget_total"]
+    if bt:
+        msg = f"这段时间日常开销已用预算 {rep['run'] / bt * 100:.0f}%（{rep['run']:.0f} / {bt:.0f} 元，不含偶发大件和生活成本）"
+        if rep["cur"] and end > today and rep["days"] >= 5:
+            proj = rep["run"] / rep["days"] * rep["total_days"]
+            if proj > bt:
+                msg += f"；按目前速度到期末约 {proj:.0f} 元，会超支约 {proj - bt:.0f} 元"
         out.append(msg)
-    prev = ym_add(ym, -1)
-    pc = cat_sums(data, allr, prev)
+    n = rep["total_days"]
+    pe = start - dt.timedelta(days=1)
+    pc = cat_sums_range(allr, pe - dt.timedelta(days=n - 1), pe)
     for c, v in rep["cats"].items():
         p = pc.get(c, 0)
         if p > 0:
-            a, b = v / rep["days"], p / ym_days(prev)
-            if a > b * 1.25 and (a - b) * ym_days(ym) >= 30:
-                out.append(f"{c}日均 {a:.1f} 元，比上月日均（{b:.1f} 元）多 {(a / b - 1) * 100:.0f}%")
+            a, b = v / rep["days"], p / n
+            if a > b * 1.25 and (a - b) * n >= 30:
+                out.append(f"{c}日均 {a:.1f} 元，比上一个同样长度的时间段（{b:.1f} 元）多 {(a / b - 1) * 100:.0f}%")
     thr = data["settings"]["alert_pct"]
-    mrecs = [r for r in allr if r["date"][:7] == ym and r["kind"] == "daily" and r["upp"] is not None]
+    mrecs = [r for r in allr if S <= r["date"] <= E and r["kind"] == "daily" and r["upp"] is not None]
     for item in sorted({r["item"] for r in mrecs}):
-        s = item_setting(data, item)
-        if s["strategy"] != "随便买":
+        if item_setting(data, item)["strategy"] != "随便买":
             continue
         rs = item_records(allr, item, "upp")
-        hist = [r["upp"] for r in rs if r["date"][:7] < ym]
-        cur_v = [r["upp"] for r in rs if r["date"][:7] == ym]
+        hist = [r["upp"] for r in rs if r["date"] < S]
+        cur_v = [r["upp"] for r in rs if S <= r["date"] <= E]
         if len(hist) >= 3 and cur_v:
             h, c = sum(hist) / len(hist), sum(cur_v) / len(cur_v)
             if c > h * (1 + thr / 100):
-                out.append(f"{item}本月均价 {c:.2f} {LABEL[rs[0]['dim']]}，比历史均价 {h:.2f} 高 {(c / h - 1) * 100:.0f}%，近期偏贵")
+                out.append(f"{item}这段时间均价 {c:.2f} {LABEL[rs[0]['dim']]}，比历史均价 {h:.2f} 高 {(c / h - 1) * 100:.0f}%，近期偏贵")
         brands = {}
         for r in rs:
-            if r["brand"] and (today - D(r["date"])).days <= 90:
+            if r["brand"] and 0 <= (ref - D(r["date"])).days <= 90:
                 brands.setdefault(r["brand"], []).append(r["upp"])
         if len(brands) >= 2:
             avg = {b: sum(v) / len(v) for b, v in brands.items()}
             best = min(avg, key=avg.get)
-            for r in [x for x in rs if x["date"][:7] == ym and x["brand"] and x["brand"] != best]:
+            for r in [x for x in rs if S <= x["date"] <= E and x["brand"] and x["brand"] != best]:
                 if avg[r["brand"]] > avg[best] * 1.1:
-                    out.append(f"{item}：{best}近 3 个月均价最低（{avg[best]:.2f}），本月你买了{r['brand']}（{avg[r['brand']]:.2f}）")
+                    out.append(f"{item}：{best}近 3 个月均价最低（{avg[best]:.2f}），这段时间你买了{r['brand']}（{avg[r['brand']]:.2f}）")
                     break
     for item, s in data["item_settings"].items():
         if s.get("strategy") == "认品牌":
-            t = loyal_trend(data, allr, item, today)
+            t = loyal_trend(data, allr, item, ref)
             if t and t["pct"] >= thr:
                 out.append(f"你认的「{item}」近 3 个月涨了 {t['pct']:.0f}%（{t['first']:.2f} → {t['last']:.2f} {LABEL[t['dim']]}），要不要重新考虑")
     if rep["bigs"]:
-        tot12 = sum(r["net"] for r in allr if r["kind"] == "big" and ym_add(ym, -11) <= r["date"][:7] <= ym)
-        out.append(f"本月偶发大件 {rep['big']:.0f} 元，已排除在日均和预算之外；近 12 个月大件共 {tot12:.0f} 元")
+        tot12 = sum(r["net"] for r in allr if r["kind"] == "big" and ref - dt.timedelta(days=365) < D(r["date"]) <= ref)
+        out.append(f"这段时间偶发大件 {rep['big']:.0f} 元，已排除在日均和预算之外；近 12 个月大件共 {tot12:.0f} 元")
+    out += tracker_notes(data, today, start, end)
     if rep["cur"]:
         out += bill_status(data, today)
     return out
