@@ -190,28 +190,19 @@ def run_js(html):
         components.html(html, height=0)
 
 
-NEW = "＋ 手动输入新的"
-
-
-def set_pick(key, value, options):
-    ss = st.session_state
-    if value in options:
-        ss[key + "_sel"] = value
-    elif value:
-        ss[key + "_sel"], ss[key + "_new"] = NEW, value
-    else:
-        ss[key + "_sel"] = None
+def set_pick(key, value, options=None):
+    st.session_state[key + "_sel"] = value or None
 
 
 def pick(label, options, key, placeholder="请选择", init=None):
-    """下拉选择，点一下只展开列表，不弹键盘。历史里没有时，选最后一项「＋ 手动输入新的」，再点出现的输入框打字。"""
+    """一个框：可以选历史，也可以直接输入新的，回车后加入。"""
     ss = st.session_state
     base = [o for o in dict.fromkeys(options) if o]
     if key + "_sel" not in ss:
-        set_pick(key, ss.get(key, init), base)
-    sel = st.selectbox(label, base + [NEW], index=None, placeholder=placeholder, key=key + "_sel")
-    val = txt(st.text_input("✏️ 输入新的" + label.split("（")[0], key=key + "_new", placeholder="点这里输入")) if sel == NEW else sel
-    ss[key] = val or None
+        ss[key + "_sel"] = ss.get(key, init) or None
+    st.selectbox(label, opts(base, ss[key + "_sel"]), index=None, accept_new_options=True,
+                 placeholder=placeholder, key=key + "_sel")
+    ss[key] = txt(ss[key + "_sel"]) or None
     return ss[key]
 
 
@@ -261,28 +252,20 @@ NOKB = r"""<script>
     window.__nokb = 1;
     var SEL = 'input[role=combobox], [data-testid=stSelectbox] input, [data-baseweb=select] input, [data-testid=stDateInput] input';
     var BOX = '[data-testid=stSelectbox], [data-baseweb=select], [data-testid=stDateInput]';
+    var TYPE = '[class*="st-key-"][class*="_sel"]';
     var NAMES = {january:1,february:2,march:3,april:4,may:5,june:6,july:7,august:8,september:9,october:10,november:11,december:12};
-    var seen = new WeakSet();
     function fix() {
       document.querySelectorAll(SEL).forEach(function (i) {
+        if (i.closest(TYPE)) return;
         if (i.getAttribute('inputmode') !== 'none') i.setAttribute('inputmode', 'none');
         if (!i.readOnly && !i.closest('[data-testid=stDateInput]')) i.readOnly = true;
       });
-      if (window.matchMedia && window.matchMedia('(pointer: fine)').matches) {
-        document.querySelectorAll('input[placeholder="点这里输入"]').forEach(function (i) {
-          if (!seen.has(i)) {
-            seen.add(i);
-            var tries = 0;
-            (function go() { if (document.activeElement === i || tries++ > 8) return; i.focus(); setTimeout(go, 150); })();
-          }
-        });
-      }
     }
     function early(e) {
       var t = e.target;
       if (t && t.closest) {
         var b = t.closest(BOX);
-        if (b) b.querySelectorAll('input').forEach(function (i) { i.setAttribute('inputmode', 'none'); });
+        if (b && !t.closest(TYPE)) b.querySelectorAll('input').forEach(function (i) { i.setAttribute('inputmode', 'none'); });
       }
     }
     function iso(label) {
