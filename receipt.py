@@ -184,7 +184,12 @@ def render_day_html(data, day):
 
 
 def render_month(rep):
-    out = [DSEP, center(f"{rep['ym']} 月 度 小 票"), DSEP]
+    """时间段小票（周 / 月 / 季度 / 半年 / 年 / 自定义共用）。"""
+    title = rep["title"].split("（")[0]
+    out = [DSEP, center(title + " 小票")]
+    if "~" not in title:
+        out.append(center(f"{rep['start']} ~ {rep['end']}"))
+    out.append(DSEP)
     out.append(line("收入", money(rep["income"])))
     out.append(SEP)
     out.append(line("日常消耗", money(rep["daily"])))
