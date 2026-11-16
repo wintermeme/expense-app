@@ -210,7 +210,7 @@ def pick(label, options, key, placeholder="请选择", init=None):
     if key + "_sel" not in ss:
         set_pick(key, ss.get(key, init), base)
     sel = st.selectbox(label, base + [NEW], index=None, placeholder=placeholder, key=key + "_sel")
-    val = txt(st.text_input(label + "（新的）", key=key + "_new", placeholder="点这里输入")) if sel == NEW else sel
+    val = txt(st.text_input("✏️ 输入新的" + label.split("（")[0], key=key + "_new", placeholder="点这里输入")) if sel == NEW else sel
     ss[key] = val or None
     return ss[key]
 
@@ -262,10 +262,21 @@ NOKB = r"""<script>
     var SEL = 'input[role=combobox], [data-testid=stSelectbox] input, [data-baseweb=select] input, [data-testid=stDateInput] input';
     var BOX = '[data-testid=stSelectbox], [data-baseweb=select], [data-testid=stDateInput]';
     var NAMES = {january:1,february:2,march:3,april:4,may:5,june:6,july:7,august:8,september:9,october:10,november:11,december:12};
+    var seen = new WeakSet();
     function fix() {
       document.querySelectorAll(SEL).forEach(function (i) {
         if (i.getAttribute('inputmode') !== 'none') i.setAttribute('inputmode', 'none');
+        if (!i.readOnly && !i.closest('[data-testid=stDateInput]')) i.readOnly = true;
       });
+      if (window.matchMedia && window.matchMedia('(pointer: fine)').matches) {
+        document.querySelectorAll('input[placeholder="点这里输入"]').forEach(function (i) {
+          if (!seen.has(i)) {
+            seen.add(i);
+            var tries = 0;
+            (function go() { if (document.activeElement === i || tries++ > 8) return; i.focus(); setTimeout(go, 150); })();
+          }
+        });
+      }
     }
     function early(e) {
       var t = e.target;
