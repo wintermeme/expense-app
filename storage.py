@@ -9,7 +9,7 @@ import requests
 import streamlit as st
 
 DEFAULT = {
-    "orders": [], "bills": [], "income": [], "drafts": [],
+    "orders": [], "bills": [], "income": [], "drafts": [], "trackers": [], "hidden": {},
     "item_settings": {},
     "categories": {
         "食材": {"kind": "daily"}, "日用品": {"kind": "daily"},
