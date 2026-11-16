@@ -141,7 +141,7 @@ def parse_qty(s):
 
 
 # ---------- 历史记忆：店铺、品牌、物品、数量都从已有记录里统计，不用另外存 ----------
-def hist(d):
+def hist(d, raw=False):
     sc, bc, ic = Counter(), Counter(), Counter()
     last, qtys, ibr = {}, {}, {}
     for o in sorted(d["orders"], key=lambda o: o["date"]):
@@ -157,16 +157,19 @@ def hist(d):
                 ibr.setdefault(i["item"], Counter())[i["brand"]] += 1
             if i.get("qty"):
                 qtys.setdefault(i["item"], []).append(f"{i['qty']:g}")
-    return {"stores": [k for k, _ in sc.most_common()], "brands": [k for k, _ in bc.most_common()],
-            "items": [k for k, _ in ic.most_common()], "last": last,
-            "ibrands": {k: [b for b, _ in v.most_common()] for k, v in ibr.items()},
+    hid = {} if raw else d.get("hidden", {})
+    hs, hb, hi = set(hid.get("stores", [])), set(hid.get("brands", [])), set(hid.get("items", []))
+    return {"stores": [k for k, _ in sc.most_common() if k not in hs],
+            "brands": [k for k, _ in bc.most_common() if k not in hb],
+            "items": [k for k, _ in ic.most_common() if k not in hi], "last": last,
+            "ibrands": {k: [b for b, _ in v.most_common() if b not in hb] for k, v in ibr.items()},
             "qtys": {k: list(dict.fromkeys(reversed(v)))[:6] for k, v in qtys.items()}}
 
 
 TRANSPORT = ["地铁", "公交", "打车", "共享单车", "高铁火车", "飞机", "其他"]
 
 
-def transport_hist(d):
+def transport_hist(d, raw=False):
     cnt, last = Counter(), {}
     for o in sorted(d["orders"], key=lambda o: o["date"]):
         for i in o["items"]:
@@ -174,7 +177,29 @@ def transport_hist(d):
                 cnt[i["item"]] += 1
                 last[i["item"]] = i["amount"]
     tools = [k for k, _ in cnt.most_common()]
-    return tools + [t for t in TRANSPORT if t not in tools], last
+    tools = tools + [t for t in TRANSPORT if t not in tools]
+    hid = set() if raw else set(d.get("hidden", {}).get("tools", []))
+    return [t for t in tools if t not in hid], last
+
+
+BILL_PRESET = ["房租", "物业", "电费", "水费", "燃气", "网费", "话费"]
+
+
+def option_pool(d):
+    """所有下拉选项（含已隐藏的），给设置页的「下拉选项管理」用。"""
+    h = hist(d, raw=True)
+    return {"stores": h["stores"], "items": h["items"], "brands": h["brands"],
+            "tools": transport_hist(d, raw=True)[0],
+            "bills": sorted({b["name"] for b in d["bills"]} | set(BILL_PRESET)),
+            "income": list(dict.fromkeys(x["source"] for x in d["income"]))}
+
+
+def unhide(d, grp, vals):
+    """用户又记了一次已经删掉的选项，就让它回到下拉里。"""
+    hid = d.get("hidden", {})
+    for v in vals:
+        if v and v in hid.get(grp, []):
+            hid[grp].remove(v)
 
 
 def opts(base, cur):
@@ -229,7 +254,12 @@ def item_fields(p, init, d, refund=False):
                 ss[p + "unit"] = lp["unit"]
     pick("品牌（可不填）", bopts, p + "brand", "选择历史品牌", init.get("brand"))
     st.selectbox("分类", cats, key=p + "cat")
-    pick("数量（可不填）", H["qtys"].get(cur, []), p + "qty", "选择常用数量", init.get("qty"))
+    if init.get("qty") not in (None, ""):
+        try:
+            ss.setdefault(p + "qty", float(init["qty"]))
+        except (TypeError, ValueError):
+            pass
+    st.number_input("数量（可不填）", min_value=0.0, value=None, step=1.0, format="%g", placeholder="可不填", key=p + "qty")
     st.selectbox("单位", calc.UNIT_LIST, key=p + "unit")
     st.number_input("金额（元）", min_value=0.0, value=None, step=0.5, format="%.2f", placeholder="0.00", key=p + "amount")
     st.checkbox("偶发大件，不计入日均", key=p + "big")
@@ -321,6 +351,9 @@ def commit_order(day, store, items, extras, draft_id=None):
 
     def mut(d):
         d["orders"].append(order)
+        unhide(d, "stores", [order["store"]])
+        unhide(d, "items", [i["item"] for i in items])
+        unhide(d, "brands", [i["brand"] for i in items])
         if draft_id:
             d["drafts"] = [x for x in d["drafts"] if x["id"] != draft_id]
     return write(mut, "add order")
@@ -473,6 +506,7 @@ def dlg_transport():
             def mut(dd):
                 dd["categories"].setdefault("交通", {"kind": "casual"})
                 dd["orders"].append(order)
+                unhide(dd, "tools", [tool])
             if write(mut, "add transport"):
                 ss["flash"] = "已记录交通 ✓"
                 st.rerun()
@@ -487,7 +521,7 @@ def dlg_edit(rid):
         st.info("这条记录已不存在")
         return
     init = {"item": r["item"], "brand": r["brand"], "cat": r["category"], "unit": r["unit"], "amount": r["amount"],
-            "qty": f"{r['qty']:g}" if r["qty"] else None, "big": r["kind"] == "big" and r["category"] in d["categories"]
+            "qty": r["qty"] or None, "big": r["kind"] == "big" and r["category"] in d["categories"]
             and d["categories"][r["category"]].get("kind") != "big"}
     rf0 = r["refund"]
     init["rmode"] = "全额退款" if rf0 > 0 and rf0 >= r["amount"] - 1e-9 else ("部分退款" if rf0 > 0 else "无退款")
@@ -567,7 +601,7 @@ def dlg_cmp():
 @st.dialog("记缴费")
 def dlg_bill():
     ss, d = st.session_state, st.session_state["data"]
-    names = sorted({b["name"] for b in d["bills"]} | {"房租", "物业", "电费", "水费", "燃气", "网费", "话费"})
+    names = [n for n in option_pool(d)["bills"] if n not in d.get("hidden", {}).get("bills", [])]
     ss.setdefault("dlg_b_date", ss["today"])
     pick("名称", names, "dlg_b_name", "选择缴费名称")
     st.date_input("缴费日期", key="dlg_b_date")
@@ -577,7 +611,10 @@ def dlg_bill():
             st.warning("请填写名称和金额")
         else:
             rec = {"id": uid(), "name": txt(ss["dlg_b_name"]), "date": str(ss["dlg_b_date"]), "amount": float(ss["dlg_b_amt"])}
-            if write(lambda dd: dd["bills"].append(rec), "add bill"):
+            def mut(dd):
+                dd["bills"].append(rec)
+                unhide(dd, "bills", [rec["name"]])
+            if write(mut, "add bill"):
                 ss["flash"] = "已记录缴费 ✓"
                 st.rerun()
 
@@ -585,7 +622,7 @@ def dlg_bill():
 @st.dialog("记收入")
 def dlg_income():
     ss, d = st.session_state, st.session_state["data"]
-    srcs = list(dict.fromkeys(x["source"] for x in d["income"]))
+    srcs = [n for n in option_pool(d)["income"] if n not in d.get("hidden", {}).get("income", [])]
     ss.setdefault("dlg_i_date", ss["today"])
     pick("来源", srcs, "dlg_i_src", "选择历史来源，比如工资")
     st.date_input("日期", key="dlg_i_date")
@@ -596,8 +633,63 @@ def dlg_income():
         else:
             rec = {"id": uid(), "source": txt(ss.get("dlg_i_src")) or "收入", "date": str(ss["dlg_i_date"]),
                    "amount": float(ss["dlg_i_amt"])}
-            if write(lambda dd: dd["income"].append(rec), "add income"):
+            def mut(dd):
+                dd["income"].append(rec)
+                unhide(dd, "income", [rec["source"]])
+            if write(mut, "add income"):
                 ss["flash"] = "已记录收入 ✓"
+                st.rerun()
+
+
+@st.dialog("加入用量追踪")
+def dlg_track_add():
+    ss, d = st.session_state, st.session_state["data"]
+    tracked = {t["item_id"] for t in d["trackers"]}
+    rs = sorted([r for r in an.records(d) if r["id"] not in tracked and r["net"] > 0], key=lambda r: r["date"], reverse=True)[:400]
+    if not rs:
+        st.info("没有可以加入的记录了。")
+        return
+    labels = {r["id"]: f"{r['date']}　{lbl(r)}{'　' + format(r['qty'], 'g') + r['unit'] if r['qty'] else ''}　¥{r['net']:.2f}" for r in rs}
+    rid = st.selectbox("选一件已经记录过的物品", list(labels), format_func=labels.get, index=None,
+                       placeholder="选择，也可以输入关键字搜索", key="dlg_k_rec_sel")
+    if rid != ss.get("dlg_k_last"):
+        ss["dlg_k_last"] = rid
+        if rid:
+            ss["dlg_k_start"] = dt.date.fromisoformat(next(r["date"] for r in rs if r["id"] == rid))
+    ss.setdefault("dlg_k_start", ss["today"])
+    st.date_input("开始使用的日期（默认是购买日）", key="dlg_k_start")
+    if st.button("加入追踪", type="primary", width="stretch"):
+        r = next((x for x in rs if x["id"] == rid), None)
+        if r is None:
+            st.warning("请先选择一件物品")
+        else:
+            rec = {"id": uid(), "item_id": r["id"], "item": r["item"], "brand": r["brand"], "qty": r["qty"],
+                   "unit": r["unit"], "amount": round(r["net"], 2), "start": str(ss["dlg_k_start"]), "end": None}
+            if write(lambda dd: dd["trackers"].append(rec), "add tracker"):
+                ss["flash"] = "已加入追踪"
+                st.rerun()
+
+
+@st.dialog("已用完")
+def dlg_track_done(tid):
+    ss, d = st.session_state, st.session_state["data"]
+    t = next((x for x in d["trackers"] if x["id"] == tid), None)
+    if t is None:
+        st.info("这条记录已不存在")
+        return
+    ss.setdefault("dlg_d_date", dt.date.fromisoformat(t["end"]) if t.get("end") else ss["today"])
+    st.write(f"「{t['item']}」从 {t['start']} 开始用")
+    st.date_input("用完的日期", key="dlg_d_date")
+    if st.button("保存", type="primary", width="stretch"):
+        if str(ss["dlg_d_date"]) < t["start"]:
+            st.warning("用完的日期不能早于开始使用的日期")
+        else:
+            def mut(dd):
+                for x in dd["trackers"]:
+                    if x["id"] == tid:
+                        x["end"] = str(ss["dlg_d_date"])
+            if write(mut, "tracker done"):
+                ss["flash"] = "已记录"
                 st.rerun()
 
 
@@ -625,6 +717,42 @@ def open_multi(init=None, draft=None):
     ss["dlg_init"], ss["dlg_draft"] = init or {}, draft
     ss["dlg_m_items"], ss["dlg_m_c"] = list((init or {}).get("items", [])), 0
     dlg_multi()
+
+
+def month_end(y, m):
+    return dt.date(y, m, calendar.monthrange(y, m)[1])
+
+
+def period_options(kind, first, today):
+    """各类时间段，从新到旧。返回 [(名称, 开始, 结束)]。"""
+    out, one = [], dt.timedelta(days=1)
+    if kind == "周":
+        s, cur = first - dt.timedelta(days=first.weekday()), today - dt.timedelta(days=today.weekday())
+        while s <= cur:
+            e = s + dt.timedelta(days=6)
+            out.append((f"{s:%Y-%m-%d} ~ {e:%m-%d}", s, e))
+            s += dt.timedelta(days=7)
+    elif kind == "月":
+        y, m = first.year, first.month
+        while (y, m) <= (today.year, today.month):
+            out.append((f"{y}年{m}月", dt.date(y, m, 1), month_end(y, m)))
+            y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    elif kind == "季度":
+        for y in range(first.year, today.year + 1):
+            for q in range(4):
+                s, e = dt.date(y, q * 3 + 1, 1), month_end(y, q * 3 + 3)
+                if e >= first and s <= today:
+                    out.append((f"{y}年第{q + 1}季度（{q * 3 + 1}-{q * 3 + 3}月）", s, e))
+    elif kind == "半年":
+        for y in range(first.year, today.year + 1):
+            for h in range(2):
+                s, e = dt.date(y, h * 6 + 1, 1), month_end(y, h * 6 + 6)
+                if e >= first and s <= today:
+                    out.append((f"{y}年{'上' if h == 0 else '下'}半年", s, e))
+    else:
+        for y in range(first.year, today.year + 1):
+            out.append((f"{y}年", dt.date(y, 1, 1), dt.date(y, 12, 31)))
+    return out[::-1]
 
 
 def open_plain(fn, *args):
@@ -696,7 +824,7 @@ def calendar_pick():
     return dt.date.fromisoformat(ss["cal_sel"])
 
 
-t_add, t_rc, t_cmp, t_price, t_rep, t_life, t_set = st.tabs(["记账", "小票", "比价", "价格", "月报", "生活", "设置"])
+t_add, t_rc, t_cmp, t_price, t_rep, t_life, t_set = st.tabs(["记账", "小票", "比价", "价格", "报告", "生活", "设置"])
 
 # ---------------- 记账 ----------------
 with t_add:
@@ -823,51 +951,72 @@ with t_price:
                 st.write("各品牌对比（按平均单价从低到高）")
                 st.dataframe(pd.DataFrame(bt).round(2), hide_index=True, width="stretch")
 
-# ---------------- 月报 ----------------
+# ---------------- 报告（周 / 月 / 季度 / 半年 / 年 / 自定义） ----------------
 with t_rep:
-    months = sorted({r["date"][:7] for r in recs} | {b["date"][:7] for b in data["bills"]}
-                    | {x["date"][:7] for x in data["income"]} | {an.ym_of(today)}, reverse=True)
-    ym = st.selectbox("月份", months)
-    mode_lab = st.radio("口径", ["摊销（默认）", "现金"], horizontal=True,
-                        help="摊销：房租按天分摊、水电气用月均；现金：缴费当月算当月支出")
-    rep = an.month_report(data, ym, "cash" if mode_lab == "现金" else "amort", today)
-    a, b = st.columns(2)
-    a.metric("收入", f"{rep['income']:.2f}")
-    b.metric("总支出", f"{rep['spend']:.2f}")
-    a.metric("结余", f"{rep['balance']:.2f}")
-    b.metric("日均消费", f"{rep['day_avg']:.2f}", help="日常消耗 + 随手消费 + 附加费用，不含偶发大件和生活成本")
-    st.dataframe(pd.DataFrame([
-        {"项目": "日常消耗", "金额": rep["daily"]}, {"项目": "随手消费", "金额": rep["casual"]},
-        {"项目": "附加费用（运费等）", "金额": rep["extras"]}, {"项目": "偶发大件", "金额": rep["big"]},
-        {"项目": "生活成本", "金额": rep["living"]}]).round(2), hide_index=True, width="stretch")
-    if rep["cats"]:
-        st.write("日常和随手消费分类")
-        cdf = pd.DataFrame([{"分类": k, "金额": v, "占比": f"{v / rep['run'] * 100:.0f}%" if rep["run"] else ""}
-                            for k, v in sorted(rep["cats"].items(), key=lambda x: -x[1])])
-        st.dataframe(cdf.round(2), hide_index=True, width="stretch")
-    if rep["transport"]:
-        st.write(f"交通明细（共 ¥{sum(x['amount'] for x in rep['transport']):.2f}）")
-        st.dataframe(pd.DataFrame([{"交通工具": x["item"], "次数": x["n"], "金额": round(x["amount"], 2),
-                                    "平均每次": round(x["amount"] / x["n"], 2)} for x in rep["transport"]]),
-                     hide_index=True, width="stretch")
-    if rep["bigs"]:
-        st.write("偶发大件明细")
-        st.dataframe(pd.DataFrame([{"日期": r["date"], "物品": r["item"], "金额": r["net"]} for r in rep["bigs"]]),
-                     hide_index=True, width="stretch")
-    if rep["living_rows"]:
-        st.write("生活成本明细")
-        st.dataframe(pd.DataFrame([{"名称": n_, "金额": round(v, 2), "说明": nt} for n_, v, nt in rep["living_rows"]]),
-                     hide_index=True, width="stretch")
-    st.write("建议")
-    if rep["advice"]:
-        for t in rep["advice"]:
-            st.markdown(f"- {t}")
+    ds = [o["date"] for o in data["orders"]] + [b["date"] for b in data["bills"]] + [x["date"] for x in data["income"]]
+    first = min(dt.date.fromisoformat(x) for x in ds) if ds else today
+    kind = st.radio("时间段", ["周", "月", "季度", "半年", "年", "自定义"], index=1, horizontal=True,
+                    label_visibility="collapsed", key="rep_kind")
+    rep = None
+    if kind == "自定义":
+        rng = st.date_input("起止日期", value=(today.replace(day=1), today), key="rep_range")
+        if isinstance(rng, (tuple, list)) and len(rng) == 2:
+            label, start, end = f"{rng[0]} ~ {rng[1]}", rng[0], rng[1]
+            rep_ok = True
+        else:
+            rep_ok = False
+            st.info("请选好开始和结束两个日期")
     else:
-        st.caption("暂时没有需要提醒的，数据多了会更准。")
-    mtxt = receipt.render_month(rep)
-    with st.expander("月度小票（可复制）"):
-        st.code(mtxt, language=None)
-        st.download_button("下载 .txt", mtxt, file_name=f"月度小票-{ym}.txt", key="mdl")
+        popts = period_options(kind, first, today)
+        label = st.selectbox("选择" + kind, [o[0] for o in popts], key=f"rep_sel_{kind}")
+        _, start, end = next(o for o in popts if o[0] == label)
+        rep_ok = True
+    mode_lab = st.radio("口径", ["摊销（默认）", "现金"], horizontal=True,
+                        help="摊销：房租按天分摊、水电气用月均；现金：缴费当天算当天支出")
+    if rep_ok:
+        mode = "cash" if mode_lab == "现金" else "amort"
+        rep = an.period_report(data, start, end, mode, today, title=label)
+        a, b = st.columns(2)
+        a.metric("收入", f"{rep['income']:.2f}")
+        b.metric("总支出", f"{rep['spend']:.2f}")
+        a.metric("结余", f"{rep['balance']:.2f}")
+        b.metric("日均消费", f"{rep['day_avg']:.2f}", help="日常消耗 + 随手消费 + 附加费用，不含偶发大件和生活成本")
+        st.dataframe(pd.DataFrame([
+            {"项目": "日常消耗", "金额": rep["daily"]}, {"项目": "随手消费", "金额": rep["casual"]},
+            {"项目": "附加费用（运费等）", "金额": rep["extras"]}, {"项目": "偶发大件", "金额": rep["big"]},
+            {"项目": "生活成本", "金额": rep["living"]}]).round(2), hide_index=True, width="stretch")
+        tdf = pd.DataFrame(an.trend(data, rep, mode, today))
+        if len(tdf) > 1:
+            st.write("消费走势（按天）" if rep["total_days"] <= 31 else "消费走势（按月）")
+            st.bar_chart(tdf.set_index("期间"), color=["#6F78B8", "#A5ABD9", "#D8BE8A", "#D49A9A", "#86BDB1"][:len(tdf.columns) - 1])
+        if rep["cats"]:
+            st.write("日常和随手消费分类")
+            cdf = pd.DataFrame([{"分类": k, "金额": v, "占比": f"{v / rep['run'] * 100:.0f}%" if rep["run"] else ""}
+                                for k, v in sorted(rep["cats"].items(), key=lambda x: -x[1])])
+            st.dataframe(cdf.round(2), hide_index=True, width="stretch")
+        if rep["transport"]:
+            st.write(f"交通明细（共 ¥{sum(x['amount'] for x in rep['transport']):.2f}）")
+            st.dataframe(pd.DataFrame([{"交通工具": x["item"], "次数": x["n"], "金额": round(x["amount"], 2),
+                                        "平均每次": round(x["amount"] / x["n"], 2)} for x in rep["transport"]]),
+                         hide_index=True, width="stretch")
+        if rep["bigs"]:
+            st.write("偶发大件明细")
+            st.dataframe(pd.DataFrame([{"日期": r["date"], "物品": r["item"], "金额": r["net"]} for r in rep["bigs"]]),
+                         hide_index=True, width="stretch")
+        if rep["living_rows"]:
+            st.write("生活成本明细")
+            st.dataframe(pd.DataFrame([{"名称": n_, "金额": round(v, 2), "说明": nt} for n_, v, nt in rep["living_rows"]]),
+                         hide_index=True, width="stretch")
+        st.write("建议")
+        if rep["advice"]:
+            for t in rep["advice"]:
+                st.markdown(f"- {t}")
+        else:
+            st.caption("暂时没有需要提醒的，数据多了会更准。")
+        mtxt = receipt.render_month(rep)
+        with st.expander("小票（可复制）"):
+            st.code(mtxt, language=None)
+            st.download_button("下载 .txt", mtxt, file_name=f"报告-{label.split('（')[0]}.txt", key="mdl")
 
 # ---------------- 生活 ----------------
 with t_life:
@@ -900,6 +1049,38 @@ with t_life:
         if c.button("删", key="id_" + x["id"]):
             open_plain(dlg_confirm, "income", x["id"], f"{x['date']} {x['source']} ¥{x['amount']:.2f}")
 
+    st.divider()
+    st.write("用量追踪")
+    if st.button("＋ 加入追踪", width="stretch", key="trk_add"):
+        open_plain(dlg_track_add)
+    for t in an.tracker_notes(data, today):
+        st.info(t)
+    trows = an.tracker_rows(data, today)
+    qty_txt = lambda r: f"{r['qty']:g}{r['unit']}" if r.get("qty") else ""
+    act = [r for r in trows if not r["done"]]
+    fin = sorted([r for r in trows if r["done"]], key=lambda r: r["end"], reverse=True)
+    if not trows:
+        st.caption("把买过的东西加进来，用完时点「已用完」，就能知道每一件用了多久。")
+    for r in act:
+        exp = an.tracker_expect(trows, r)
+        st.markdown(f"**{r['item']}{'·' + r['brand'] if r['brand'] else ''}** {qty_txt(r)}　开始 {r['start']}　已用 {r['days']} 天"
+                    + (f"（以往约 {exp:.0f} 天）" if exp else ""))
+        c1, c2 = st.columns(2)
+        if c1.button("已用完", key="trk_done_" + r["id"], width="stretch"):
+            open_plain(dlg_track_done, r["id"])
+        if c2.button("删除追踪", key="trk_del_" + r["id"], width="stretch"):
+            open_plain(dlg_confirm, "trackers", r["id"], f"追踪「{r['item']}」")
+    if fin:
+        st.write("已用完")
+    for r in fin[:10]:
+        st.markdown(f"{r['item']}{'·' + r['brand'] if r['brand'] else ''} {qty_txt(r)}：{r['start']} → {r['end']}，"
+                    f"用了 **{r['days']} 天**，日均 ¥{r['cost_day']:.2f}")
+        c1, c2 = st.columns(2)
+        if c1.button("改日期", key="trk_edit_" + r["id"], width="stretch"):
+            open_plain(dlg_track_done, r["id"])
+        if c2.button("删除", key="trk_rm_" + r["id"], width="stretch"):
+            open_plain(dlg_confirm, "trackers", r["id"], f"追踪「{r['item']}」")
+
 # ---------------- 设置 ----------------
 with t_set:
     fk = st.selectbox("字体", list(FONTS), index=list(FONTS).index(S.get("font", "B")),
@@ -921,6 +1102,15 @@ with t_set:
     bdf = pd.DataFrame([{"名称": nm, "类型": BILL_LABEL[an.bill_kind(data, nm)]} for nm in names_b])
     bed = st.data_editor(bdf, hide_index=True, width="stretch", key="btypes", disabled=["名称"],
                          column_config={"类型": st.column_config.SelectboxColumn(options=list(BILL_KEY), required=True)})
+    with st.expander("下拉选项管理"):
+        st.caption("选中的选项会从下拉里去掉，已有的记录不受影响。想恢复，取消选中再保存；以后再记一次同名的，也会自动回来。")
+        pool = option_pool(data)
+        hid_now = data.get("hidden", {})
+        HG = [("stores", "店铺"), ("items", "物品"), ("brands", "品牌"), ("tools", "交通工具"),
+              ("bills", "缴费名称"), ("income", "收入来源")]
+        newh = {}
+        for g, nm in HG:
+            newh[g] = st.multiselect(f"不要出现的{nm}", pool[g], default=[x for x in hid_now.get(g, []) if x in pool[g]], key=f"hid_{g}")
     if st.button("保存设置", type="primary", width="stretch"):
         newc = {}
         for r in ced.to_dict("records"):
@@ -935,6 +1125,7 @@ with t_set:
             if newc:
                 d["categories"] = newc
             d["bill_types"].update(newb)
+            d["hidden"] = {g: v for g, v in newh.items() if v}
 
         if write(mut, "settings"):
             st.session_state["flash"] = "设置已保存"
