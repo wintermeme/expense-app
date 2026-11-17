@@ -150,36 +150,37 @@ def render_day(data, day):
 
 
 def render_day_html(data, day):
-    """页面上显示的小票：真正的表格，列对齐由页面保证，不受手机字体影响。"""
+    """页面上显示的小票：窄版黑白小票。列用表格排，对齐由页面保证，不受字体宽度影响。"""
     from html import escape as e
     d = dt.date.fromisoformat(day)
     groups, n, total, cats = day_summary(data, day)
-    h = ['<div class="rc"><div class="rc-title">每 日 消 费 小 票</div>',
+    h = ['<div class="rc"><div class="rc-title">每日消费小票</div>',
          f'<div class="rc-sub">{day}　周{WEEK[d.weekday()]}</div>',
-         '<table><thead><tr><th>物品</th><th>数量</th><th>单价</th><th>金额</th></tr></thead><tbody>']
+         '<table><colgroup><col class="cn"><col class="cq"><col class="cp"><col class="ca"></colgroup>'
+         '<thead><tr><th>物品</th><th>数量</th><th>单价</th><th>金额</th></tr></thead><tbody>']
     if n == 0:
         h.append('<tr><td colspan="4" class="rc-empty">今天还没有记录</td></tr>')
     for store, its, ex in groups:
         if store:
-            h.append(f'<tr class="rc-store"><td colspan="4">{e(store)}</td></tr>')
+            h.append(f'<tr class="rc-store"><td colspan="4">[{e(store)}]</td></tr>')
         for it in its:
             name, qty, price, amt = item_row(it)
             h.append(f'<tr><td>{e(name)}</td><td>{e(qty)}</td><td>{e(price)}</td><td>{money(amt)}</td></tr>')
             if it.get("refund"):
-                h.append(f'<tr class="rc-refund"><td colspan="3">　退款</td><td>-{money(it["refund"])}</td></tr>')
+                h.append(f'<tr class="rc-ex"><td colspan="3">　退款</td><td>-{money(it["refund"])}</td></tr>')
         for k, v in ex.items():
             h.append(f'<tr class="rc-ex"><td colspan="3">{e(k)}</td><td>{money(v)}</td></tr>')
         if store and (len(its) + len(ex) > 1):
             sub = sum(i["amount"] - (i.get("refund") or 0) for i in its) + sum(ex.values())
-            h.append(f'<tr class="rc-sub2"><td colspan="3">小计</td><td>{money(sub)}</td></tr>')
+            h.append(f'<tr class="rc-ex rc-sub2"><td colspan="3">小计</td><td>{money(sub)}</td></tr>')
     h.append('</tbody></table>')
-    h.append(f'<div class="rc-total"><span>共 {n} 笔</span><span>合计　¥{money(total)}</span></div>')
+    h.append(f'<div class="rc-total"><span>共 {n} 笔</span><span>合计　<b>¥{money(total)}</b></span></div>')
     if cats:
-        h.append('<div class="rc-cats">' + "　|　".join(f"{e(k)} {money(v)}" for k, v in cats.items()) + '</div>')
+        h.append('<div class="rc-cats">' + "".join(f'<span class="rc-c">{e(k)} {money(v)}</span>' for k, v in cats.items()) + '</div>')
     bills = [b for b in data["bills"] if b["date"] == day]
     if bills:
-        h.append('<div class="rc-cats">生活缴费（不计入合计）：' + "　".join(f"{e(b['name'])} {money(b['amount'])}" for b in bills) + '</div>')
-    h.append('</div>')
+        h.append('<div class="rc-cats">生活缴费（不计入合计）：' + "".join(f'<span class="rc-c">{e(b["name"])} {money(b["amount"])}</span>' for b in bills) + '</div>')
+    h.append('<div class="rc-ft">谢谢惠顾 · 明天继续记账</div></div>')
     return "".join(h)
 
 
