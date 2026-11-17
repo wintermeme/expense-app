@@ -46,21 +46,26 @@ html, body, .stApp, .stApp p, .stApp label, .stApp li, .stApp h1, .stApp h2, .st
 .st-key-cal button {{ min-height: 2.5rem; padding: 0; border: none; background: transparent; border-radius: 10px; }}
 .cal-title {{ text-align: center; font-weight: 600; padding-top: .45rem; }}
 .cal-wk {{ text-align: center; font-size: .8rem; opacity: .6; }}
-.rc tr.rc-refund td {{ color: #c0504d; opacity: .9; }}
-.rc {{ border: 1px dashed rgba(128,128,160,.55); border-radius: 14px; padding: 16px 14px; background: rgba(128,128,160,.07); }}
-.rc-title {{ text-align: center; font-size: 1.15rem; font-weight: 600; letter-spacing: .15em; }}
-.rc-sub {{ text-align: center; opacity: .7; font-size: .85rem; margin: 2px 0 10px; }}
-.rc table {{ width: 100%; border-collapse: collapse; font-size: .92rem; font-variant-numeric: tabular-nums; }}
-.rc th {{ text-align: left; font-weight: 600; opacity: .75; padding: 6px 4px; border-top: 1px dashed rgba(128,128,160,.55); border-bottom: 1px dashed rgba(128,128,160,.55); }}
-.rc td {{ padding: 5px 4px; vertical-align: top; }}
-.rc th:nth-child(n+2), .rc td:nth-child(n+2) {{ text-align: right; white-space: nowrap; }}
-.rc td:first-child {{ word-break: break-all; }}
-.rc tr.rc-store td {{ font-weight: 600; padding-top: 10px; text-align: left; opacity: .9; }}
-.rc tr.rc-ex td, .rc tr.rc-sub2 td {{ opacity: .75; }}
-.rc tr.rc-sub2 td {{ border-top: 1px dotted rgba(128,128,160,.45); }}
-.rc .rc-empty {{ text-align: center !important; opacity: .6; padding: 14px; }}
-.rc-total {{ display: flex; justify-content: space-between; font-weight: 600; font-size: 1.05rem; border-top: 1px dashed rgba(128,128,160,.55); margin-top: 8px; padding-top: 8px; }}
-.rc-cats {{ margin-top: 8px; font-size: .82rem; opacity: .75; }}
+.stApp .rc {{ width: 340px; max-width: 100%; margin: 6px auto 10px; background: #fff; padding: 22px 18px 24px; box-shadow: 0 2px 14px rgba(0,0,0,.22); font-size: 12.5px; line-height: 1.55; }}
+.stApp .rc, .stApp .rc div, .stApp .rc span, .stApp .rc b, .stApp .rc table, .stApp .rc th, .stApp .rc td {{ color: #111; font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Sarasa Mono SC", "Noto Sans Mono CJK SC", "Microsoft YaHei", monospace !important; }}
+.stApp .rc .rc-title {{ text-align: center; font-size: 15px; font-weight: 700; letter-spacing: .35em; padding: 6px 0 5px 0.35em; border-top: 3px double #111; border-bottom: 3px double #111; }}
+.stApp .rc .rc-sub {{ text-align: center; margin: 8px 0; }}
+.stApp .rc table {{ width: 100%; border-collapse: collapse; table-layout: fixed; font-variant-numeric: tabular-nums; margin: 0; }}
+.stApp .rc col.cq {{ width: 54px; }} .stApp .rc col.cp {{ width: 66px; }} .stApp .rc col.ca {{ width: 58px; }}
+.stApp .rc tr, .stApp .rc thead, .stApp .rc tbody {{ border: 0 !important; background: transparent !important; }}
+.stApp .rc th, .stApp .rc td {{ border: 0 !important; background: transparent !important; }}
+.stApp .rc thead th {{ font-weight: 700; padding: 4px 0; border-top: 1px dashed #111 !important; border-bottom: 1px dashed #111 !important; text-align: right; }}
+.stApp .rc td {{ padding: 2px 0; vertical-align: top; text-align: right; overflow-wrap: anywhere; }}
+.stApp .rc th:first-child, .stApp .rc td:first-child {{ text-align: left; }}
+.stApp .rc tr.rc-store td {{ text-align: left; font-weight: 700; padding-top: 9px; }}
+.stApp .rc tr.rc-ex td {{ color: #444; }}
+.stApp .rc tr.rc-sub2 td {{ border-top: 1px dotted #111 !important; padding-top: 3px; }}
+.stApp .rc td.rc-empty {{ text-align: center; color: #666; padding: 14px 0; }}
+.stApp .rc .rc-total {{ display: flex; justify-content: space-between; align-items: baseline; border-top: 1px dashed #111; margin-top: 8px; padding-top: 7px; }}
+.stApp .rc .rc-total b {{ font-size: 16px; }}
+.stApp .rc .rc-cats {{ margin-top: 7px; color: #333; font-size: 11.5px; line-height: 1.7; }}
+.stApp .rc .rc-c {{ white-space: nowrap; margin-right: 1.2em; display: inline-block; }}
+.stApp .rc .rc-ft {{ margin-top: 12px; text-align: center; border-top: 3px double #111; border-bottom: 3px double #111; padding: 6px 0; letter-spacing: .08em; }}
 .stApp [data-baseweb="tab-list"] {{ gap: 4px; overflow-x: auto; }}
 .block-container {{ padding-top: 4.5rem; max-width: 760px; }}
 @media (max-width: 640px) {{
